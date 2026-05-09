@@ -1,0 +1,12 @@
+.git
+.build
+.swiftpm
+data
+.DS_Store
+.vscode
+.claude
+docs
+Tests
+scripts
+*.md
+DerivedData

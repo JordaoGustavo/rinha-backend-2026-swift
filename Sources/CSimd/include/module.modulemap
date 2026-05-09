@@ -1,0 +1,4 @@
+module CSimd {
+    header "simd_distance.h"
+    export *
+}
