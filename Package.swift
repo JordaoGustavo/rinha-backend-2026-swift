@@ -21,7 +21,8 @@ let package = Package(
         .executableTarget(
             name: "Preprocessor",
             dependencies: ["FraudDetector"],
-            path: "Sources/Preprocessor"
+            path: "Sources/Preprocessor",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(
             name: "FraudDetector",
