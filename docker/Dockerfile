@@ -17,18 +17,18 @@ COPY Sources/Preprocessor/ Sources/Preprocessor/
 COPY Sources/RinhaApp/ Sources/RinhaApp/
 RUN mkdir -p Tests/FraudDetectorTests
 
-RUN swift build -c release --target Preprocessor
-
-RUN mkdir -p /data \
- && .build/release/Preprocessor /resources/references.json.gz /data/ivf.bin 4096 20 ivf 8 \
- && .build/release/Preprocessor /resources/references.json.gz /data/exact.bin 0 0 exact 0 \
- && .build/release/Preprocessor gen-warmup /resources/warmup-payloads.ndjson 200
-
-RUN swift build -c release --target RinhaApp
+RUN swift build -c release --target Preprocessor --target RinhaApp \
+ && ls -la "$(swift build -c release --show-bin-path)/" \
+ && BIN="$(swift build -c release --show-bin-path)" \
+ && mkdir -p /data \
+ && "$BIN/Preprocessor" /resources/references.json.gz /data/ivf.bin 4096 20 ivf 8 \
+ && "$BIN/Preprocessor" /resources/references.json.gz /data/exact.bin 0 0 exact 0 \
+ && "$BIN/Preprocessor" gen-warmup /resources/warmup-payloads.ndjson 200 \
+ && cp "$BIN/RinhaApp" /app-binary
 
 FROM swift:6.1-slim
 WORKDIR /app
-COPY --from=build /src/.build/release/RinhaApp .
+COPY --from=build /app-binary ./RinhaApp
 COPY --from=build /resources/mcc_risk.json          /resources/mcc_risk.json
 COPY --from=build /resources/normalization.json      /resources/normalization.json
 COPY --from=build /resources/warmup-payloads.ndjson  /resources/warmup-payloads.ndjson
