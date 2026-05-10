@@ -1,0 +1,13 @@
+{
+  "participants": ["Gustavo Jordão"],
+  "social": ["https://github.com/JordaoGustavo"],
+  "source-code-repo": "https://github.com/JordaoGustavo/rinha-backend-2026-swift",
+  "stack": [
+    "Swift 6.1",
+    "SwiftNIO",
+    "C (SIMD: AVX2/NEON)",
+    "HAProxy",
+    "Linux x64"
+  ],
+  "open_to_work": true
+}
