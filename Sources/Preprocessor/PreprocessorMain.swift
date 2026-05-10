@@ -35,9 +35,9 @@ struct PreprocessorApp {
         let nprobe = parseIntArg(args, prefix: "nprobe=", default: 40)
 
         print("Loading data from \(inputPath)...")
-        let t0 = CFAbsoluteTimeGetCurrent()
+        let t0 = Date().timeIntervalSinceReferenceDate
         let data = try DataLoader.load(path: inputPath)
-        let t1 = CFAbsoluteTimeGetCurrent()
+        let t1 = Date().timeIntervalSinceReferenceDate
         print("Loaded \(data.vectors.count) vectors in \(String(format: "%.2f", t1 - t0))s")
 
         switch format {
@@ -81,14 +81,14 @@ struct PreprocessorApp {
                          kmeansIter: Int, nprobe: Int) throws {
         print("Building IVF index: \(data.vectors.count) vectors, \(clusters) clusters, \(kmeansIter) iterations...")
 
-        let t0 = CFAbsoluteTimeGetCurrent()
+        let t0 = Date().timeIntervalSinceReferenceDate
         let result = IvfBuilder.build(
             vectors: data.vectors,
             labels: data.labels,
             numClusters: clusters,
             kmeansIterations: kmeansIter
         )
-        let t1 = CFAbsoluteTimeGetCurrent()
+        let t1 = Date().timeIntervalSinceReferenceDate
         print("IVF build completed in \(String(format: "%.2f", t1 - t0))s")
 
         let nprobeFast = min(nprobe, clusters)
