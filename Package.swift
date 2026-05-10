@@ -4,6 +4,10 @@ import PackageDescription
 let package = Package(
     name: "RinhaBackend",
     platforms: [.macOS(.v14)],
+    products: [
+        .executable(name: "RinhaApp", targets: ["RinhaApp"]),
+        .executable(name: "Preprocessor", targets: ["Preprocessor"]),
+    ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
     ],

@@ -17,9 +17,10 @@ COPY Sources/Preprocessor/ Sources/Preprocessor/
 COPY Sources/RinhaApp/ Sources/RinhaApp/
 RUN mkdir -p Tests/FraudDetectorTests
 
-RUN swift build -c release --target Preprocessor --target RinhaApp \
- && ls -la "$(swift build -c release --show-bin-path)/" \
- && BIN="$(swift build -c release --show-bin-path)" \
+RUN swift build -c release --product Preprocessor \
+ && swift build -c release --product RinhaApp \
+ && BIN=$(swift build -c release --show-bin-path) \
+ && ls -la "$BIN/Preprocessor" "$BIN/RinhaApp" \
  && mkdir -p /data \
  && "$BIN/Preprocessor" /resources/references.json.gz /data/ivf.bin 4096 20 ivf 8 \
  && "$BIN/Preprocessor" /resources/references.json.gz /data/exact.bin 0 0 exact 0 \
