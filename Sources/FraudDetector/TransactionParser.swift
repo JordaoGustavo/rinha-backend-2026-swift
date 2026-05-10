@@ -1,47 +1,14 @@
 import Foundation
 
 public enum TransactionParser {
-    // FNV-1a constants
     private static let fnvOffsetBasis: UInt64 = 14695981039346656037
     private static let fnvPrime: UInt64 = 1099511628211
-
-    // Known merchant IDs set (populated at startup)
-    nonisolated(unsafe) private static var knownMerchantHashes = Set<UInt64>()
-
-    /// Load known merchant IDs from a newline-delimited file.
-    public static func loadKnownMerchants(from path: String) throws {
-        let data = try String(contentsOfFile: path, encoding: .utf8)
-        var hashes = Set<UInt64>()
-        for line in data.split(separator: "\n", omittingEmptySubsequences: true) {
-            hashes.insert(fnv1a(String(line)))
-        }
-        knownMerchantHashes = hashes
-    }
-
-    /// Load known merchant IDs from an array of strings.
-    public static func loadKnownMerchants(_ merchants: [String]) {
-        var hashes = Set<UInt64>()
-        for m in merchants {
-            hashes.insert(fnv1a(m))
-        }
-        knownMerchantHashes = hashes
-    }
 
     @inline(__always)
     private static func fnv1a(_ string: String) -> UInt64 {
         var hash = fnvOffsetBasis
         for byte in string.utf8 {
             hash ^= UInt64(byte)
-            hash &*= fnvPrime
-        }
-        return hash
-    }
-
-    @inline(__always)
-    private static func fnv1a(_ bytes: UnsafeRawBufferPointer, from start: Int, count: Int) -> UInt64 {
-        var hash = fnvOffsetBasis
-        for i in start..<(start + count) {
-            hash ^= UInt64(bytes[i])
             hash &*= fnvPrime
         }
         return hash
@@ -57,7 +24,6 @@ public enum TransactionParser {
         min(max(value, 0), 1)
     }
 
-    /// Zeller's congruence returning Monday-based day (Mon=0..Sun=6).
     @inline(__always)
     private static func dayOfWeekMonBased(year: Int, month: Int, day: Int) -> Int {
         var y = year
@@ -68,122 +34,139 @@ public enum TransactionParser {
         }
         let k = y % 100
         let j = y / 100
-        // Zeller's formula: h = (day + (13*(m+1))/5 + k + k/4 + j/4 - 2*j) mod 7
-        // h: 0=Sat, 1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri
         var h = (day + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7
         if h < 0 { h += 7 }
-        // Convert to Monday-based: Mon=0, Tue=1, ..., Sun=6
         return (h + 5) % 7
     }
 
-    /// Parse transaction JSON and produce a 14-dim float vector (padded to 16).
-    /// The vector pointer must have room for at least 16 floats.
+    /// Parse transaction JSON (nested format) and produce a 14-dim float vector (padded to 16).
     public static func parse(_ json: UnsafeRawBufferPointer, into vector: UnsafeMutablePointer<Float>) {
-        // Zero out all 16 floats (14 dims + 2 padding)
         for i in 0..<16 { vector[i] = 0 }
-
         guard json.count > 0 else { return }
 
-        // Parse using JSONSerialization
         let data = Data(bytes: json.baseAddress!, count: json.count)
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
-        // Extract fields
-        let amount = (obj["amount"] as? NSNumber)?.doubleValue ?? 0
-        let installments = (obj["installments"] as? NSNumber)?.doubleValue ?? 1
-        let mcc = (obj["mcc"] as? NSNumber)?.intValue ?? 0
-        let merchantId = obj["merchant_id"] as? String ?? ""
-        let merchantAvgAmount = (obj["merchant_avg_amount"] as? NSNumber)?.doubleValue ?? 0
-        let custAvgAmount = (obj["customer_avg_amount"] as? NSNumber)?.doubleValue ?? 0
-        let isOnline = (obj["is_online"] as? NSNumber)?.boolValue ?? false
-        let cardPresent = (obj["card_present"] as? NSNumber)?.boolValue ?? false
-        let txCount24h = (obj["tx_count_24h"] as? NSNumber)?.doubleValue ?? 0
-        let kmFromHome = (obj["km_from_home"] as? NSNumber)?.doubleValue ?? 0
+        let transaction = obj["transaction"] as? [String: Any]
+        let customer = obj["customer"] as? [String: Any]
+        let merchant = obj["merchant"] as? [String: Any]
+        let terminal = obj["terminal"] as? [String: Any]
+        let lastTransaction = obj["last_transaction"] as? [String: Any]
 
-        // Timestamp parsing
-        let timestamp = obj["timestamp"] as? String ?? ""
-        var hour = 0
-        var year = 2024
-        var month = 1
-        var day = 1
-        parseTimestamp(timestamp, &year, &month, &day, &hour)
+        let txAmount = (transaction?["amount"] as? NSNumber)?.doubleValue ?? 0
+        let txInstallments = (transaction?["installments"] as? NSNumber)?.doubleValue ?? 0
+        let requestedAt = transaction?["requested_at"] as? String ?? ""
 
-        // Last transaction fields
-        let lastTxTimestamp = obj["last_tx_timestamp"] as? String
-        let kmFromLastTx = obj["km_from_last_tx"] as? NSNumber
+        let custAvgAmount = (customer?["avg_amount"] as? NSNumber)?.doubleValue ?? 0
+        let custTxCount24h = (customer?["tx_count_24h"] as? NSNumber)?.doubleValue ?? 0
+        let knownMerchants = customer?["known_merchants"] as? [String] ?? []
 
-        // [0] amount / maxAmount (clamped 0-1)
-        vector[0] = round4(clamp01(amount / MccRisk.maxAmount))
+        let merchantId = merchant?["id"] as? String ?? ""
+        let merchantMccRaw = merchant?["mcc"]
+        let merchantAvgAmount = (merchant?["avg_amount"] as? NSNumber)?.doubleValue ?? 0
 
-        // [1] installments / maxInstallments (clamped 0-1)
-        vector[1] = round4(clamp01(installments / MccRisk.maxInstallments))
+        let isOnline = (terminal?["is_online"] as? NSNumber)?.boolValue ?? false
+        let cardPresent = (terminal?["card_present"] as? NSNumber)?.boolValue ?? false
+        let kmFromHome = (terminal?["km_from_home"] as? NSNumber)?.doubleValue ?? 0
 
-        // [2] (amount / custAvgAmount) / amountVsAvgRatio (clamped 0-1, or 1.0 if custAvgAmount==0)
+        var merchantMcc = -1
+        if let mccNum = merchantMccRaw as? NSNumber {
+            merchantMcc = mccNum.intValue
+        } else if let mccStr = merchantMccRaw as? String, let v = Int(mccStr) {
+            merchantMcc = v
+        }
+
+        var txYear = 0, txMonth = 0, txDay = 0, txHour = 0, txMinute = 0, txSecond = 0
+        parseTimestamp(requestedAt, &txYear, &txMonth, &txDay, &txHour, &txMinute, &txSecond)
+
+        // [0] amount / maxAmount
+        vector[0] = round4(clamp01(txAmount / MccRisk.maxAmount))
+
+        // [1] installments / maxInstallments
+        vector[1] = round4(clamp01(txInstallments / MccRisk.maxInstallments))
+
+        // [2] (amount / custAvgAmount) / amountVsAvgRatio
         if custAvgAmount == 0 {
             vector[2] = 1.0
         } else {
-            vector[2] = round4(clamp01((amount / custAvgAmount) / MccRisk.amountVsAvgRatio))
+            vector[2] = round4(clamp01((txAmount / custAvgAmount) / MccRisk.amountVsAvgRatio))
         }
 
         // [3] hour / 23
-        vector[3] = round4(Double(hour) / 23.0)
+        vector[3] = round4(Double(txHour) / 23.0)
 
-        // [4] dayOfWeek(monBased) / 6
-        let dow = dayOfWeekMonBased(year: year, month: month, day: day)
+        // [4] dayOfWeek / 6
+        let dow = dayOfWeekMonBased(year: txYear, month: txMonth, day: txDay)
         vector[4] = round4(Double(dow) / 6.0)
 
-        // [5] minutesSinceLastTx / maxMinutes (clamped 0-1, or -1 if no lastTx)
-        if let lastTxTs = lastTxTimestamp, !lastTxTs.isEmpty {
-            let minutes = minutesBetween(lastTxTs, timestamp)
+        // [5] minutesSinceLastTx, [6] kmFromCurrent
+        if let lastTx = lastTransaction {
+            let lastTs = lastTx["timestamp"] as? String ?? ""
+            let kmFromCurrent = (lastTx["km_from_current"] as? NSNumber)?.doubleValue ?? 0
+
+            var lastYear = 0, lastMonth = 0, lastDay = 0, lastHour = 0, lastMinute = 0, lastSecond = 0
+            parseTimestamp(lastTs, &lastYear, &lastMonth, &lastDay, &lastHour, &lastMinute, &lastSecond)
+
+            let minutes: Double
+            if txYear == lastYear && txMonth == lastMonth {
+                let deltaSec = (txDay - lastDay) * 86400
+                    + (txHour - lastHour) * 3600
+                    + (txMinute - lastMinute) * 60
+                    + (txSecond - lastSecond)
+                minutes = Double(deltaSec) / 60.0
+            } else {
+                let txTotal = totalSeconds(txYear, txMonth, txDay, txHour, txMinute, txSecond)
+                let lastTotal = totalSeconds(lastYear, lastMonth, lastDay, lastHour, lastMinute, lastSecond)
+                minutes = Double(txTotal - lastTotal) / 60.0
+            }
+
             vector[5] = round4(clamp01(minutes / MccRisk.maxMinutes))
+            vector[6] = round4(clamp01(kmFromCurrent / MccRisk.maxKm))
         } else {
             vector[5] = -1.0
-        }
-
-        // [6] kmFromCurrent / maxKm (clamped 0-1, or -1 if no lastTx)
-        if let km = kmFromLastTx {
-            vector[6] = round4(clamp01(km.doubleValue / MccRisk.maxKm))
-        } else {
             vector[6] = -1.0
         }
 
-        // [7] kmFromHome / maxKm (clamped 0-1)
+        // [7] kmFromHome / maxKm
         vector[7] = round4(clamp01(kmFromHome / MccRisk.maxKm))
 
-        // [8] txCount24h / maxTxCount24h (clamped 0-1)
-        vector[8] = round4(clamp01(txCount24h / MccRisk.maxTxCount24h))
+        // [8] txCount24h / maxTxCount24h
+        vector[8] = round4(clamp01(custTxCount24h / MccRisk.maxTxCount24h))
 
-        // [9] isOnline ? 1 : 0
+        // [9] isOnline
         vector[9] = isOnline ? 1.0 : 0.0
 
-        // [10] cardPresent ? 1 : 0
+        // [10] cardPresent
         vector[10] = cardPresent ? 1.0 : 0.0
 
-        // [11] isUnknownMerchant ? 1 : 0
+        // [11] isUnknownMerchant — check if merchant.id is in customer.known_merchants
         let merchantHash = fnv1a(merchantId)
-        vector[11] = knownMerchantHashes.contains(merchantHash) ? 0.0 : 1.0
+        var isUnknown = true
+        for km in knownMerchants {
+            if fnv1a(km) == merchantHash {
+                isUnknown = false
+                break
+            }
+        }
+        vector[11] = isUnknown ? 1.0 : 0.0
 
-        // [12] mccRisk[mcc]
-        vector[12] = MccRisk.risk(for: mcc)
+        // [12] mccRisk
+        vector[12] = MccRisk.risk(for: merchantMcc)
 
-        // [13] merchantAvgAmount / maxMerchantAvgAmount (clamped 0-1)
+        // [13] merchantAvgAmount / maxMerchantAvgAmount
         vector[13] = round4(clamp01(merchantAvgAmount / MccRisk.maxMerchantAvgAmount))
-
-        // [14-15] padding (already zeroed)
     }
 
-    /// Parse an ISO-8601-like timestamp "YYYY-MM-DDTHH:MM:SS..." to extract year, month, day, hour.
     @inline(__always)
-    private static func parseTimestamp(_ ts: String, _ year: inout Int, _ month: inout Int, _ day: inout Int, _ hour: inout Int) {
-        // Expected format: "2024-01-15T14:30:00" or similar
-        // Positions:        0123456789012345678
+    private static func parseTimestamp(_ ts: String, _ year: inout Int, _ month: inout Int, _ day: inout Int, _ hour: inout Int, _ minute: inout Int, _ second: inout Int) {
         let bytes = Array(ts.utf8)
-        guard bytes.count >= 13 else { return }
-
+        guard bytes.count >= 19 else { return }
         year = parseInt(bytes, 0, 4)
         month = parseInt(bytes, 5, 2)
         day = parseInt(bytes, 8, 2)
         hour = parseInt(bytes, 11, 2)
+        minute = parseInt(bytes, 14, 2)
+        second = parseInt(bytes, 17, 2)
     }
 
     @inline(__always)
@@ -191,7 +174,7 @@ public enum TransactionParser {
         var result = 0
         for i in start..<(start + length) {
             guard i < bytes.count else { break }
-            let digit = Int(bytes[i]) - 48 // '0' = 48
+            let digit = Int(bytes[i]) - 48
             if digit >= 0 && digit <= 9 {
                 result = result * 10 + digit
             }
@@ -199,28 +182,9 @@ public enum TransactionParser {
         return result
     }
 
-    /// Calculate minutes between two ISO timestamps (same month/year scalar approach).
-    /// Uses a simplified calculation: converts each to total minutes since epoch-ish,
-    /// then takes the absolute difference.
-    private static func minutesBetween(_ ts1: String, _ ts2: String) -> Double {
-        let m1 = timestampToMinutes(ts1)
-        let m2 = timestampToMinutes(ts2)
-        return abs(m2 - m1)
-    }
-
     @inline(__always)
-    private static func timestampToMinutes(_ ts: String) -> Double {
-        let bytes = Array(ts.utf8)
-        guard bytes.count >= 16 else { return 0 }
-
-        let year = parseInt(bytes, 0, 4)
-        let month = parseInt(bytes, 5, 2)
-        let day = parseInt(bytes, 8, 2)
-        let hour = parseInt(bytes, 11, 2)
-        let minute = parseInt(bytes, 14, 2)
-
-        // Simple scalar: total minutes
-        let totalDays = year * 365 + month * 30 + day
-        return Double(totalDays * 1440 + hour * 60 + minute)
+    private static func totalSeconds(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int, _ second: Int) -> Int {
+        let totalDays = year * 365 + year / 4 - year / 100 + year / 400 + month * 30 + day
+        return totalDays * 86400 + hour * 3600 + minute * 60 + second
     }
 }

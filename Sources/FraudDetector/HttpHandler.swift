@@ -6,6 +6,7 @@ public final class HttpHandler: ChannelInboundHandler, @unchecked Sendable {
     public typealias OutboundOut = HTTPServerResponsePart
 
     private let detector: IvfDetector
+    private let mlp: MlpDetector?
 
     private var uri: String = ""
     private var method: HTTPMethod = .GET
@@ -19,8 +20,9 @@ public final class HttpHandler: ChannelInboundHandler, @unchecked Sendable {
     private let notFoundBody: [UInt8]
     private let fallbackBody: [UInt8]
 
-    public init(detector: IvfDetector) {
+    public init(detector: IvfDetector, mlp: MlpDetector? = nil) {
         self.detector = detector
+        self.mlp = mlp
 
         var bodies = [[UInt8]](repeating: [], count: 12)
         for fraudCount in 0...5 {
@@ -72,7 +74,6 @@ public final class HttpHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func handleFraudScore(context: ChannelHandlerContext) {
         guard let bodyBuffer = self.bodyBuffer else {
-            // No body — fallback to approved
             sendFraudResponse(context: context, approved: true, fraudCount: 0)
             return
         }
@@ -93,6 +94,22 @@ public final class HttpHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
+        // MLP fast-path: if confident, skip k-NN entirely
+        if let mlp = self.mlp {
+            let mlpResult = withUnsafePointer(to: &vector) { vecTuplePtr in
+                let vecPtr = UnsafeRawPointer(vecTuplePtr)
+                    .assumingMemoryBound(to: Float.self)
+                return mlp.predict(vector: vecPtr, dims: 14)
+            }
+            if mlpResult.confident {
+                let approved = !mlpResult.isFraud
+                let fraudCount = mlpResult.isFraud ? 5 : 0
+                sendFraudResponse(context: context, approved: approved, fraudCount: fraudCount)
+                return
+            }
+        }
+
+        // Fallback: full IVF k-NN search
         let result = withUnsafePointer(to: &vector) { vecTuplePtr in
             let vecPtr = UnsafeRawPointer(vecTuplePtr)
                 .assumingMemoryBound(to: Float.self)

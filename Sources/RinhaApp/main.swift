@@ -12,6 +12,7 @@ try MccRisk.initialize(
 
 let dataPath = ProcessInfo.processInfo.environment["INDEX_PATH"] ?? "/data/ivf.bin"
 let exactPath = ProcessInfo.processInfo.environment["EXACT_PATH"]
+let modelPath = ProcessInfo.processInfo.environment["MODEL_PATH"] ?? resourcesPath + "/model.bin"
 let socketPath = ProcessInfo.processInfo.environment["SOCKET_PATH"]
 let port = Int(ProcessInfo.processInfo.environment["API_PORT"] ?? "8080") ?? 8080
 
@@ -24,6 +25,16 @@ if let ep = exactPath, FileManager.default.fileExists(atPath: ep) {
     detector = try IvfDetector(ivfPath: dataPath)
 }
 print("Loaded \(detector.numVectors) vectors, \(detector.numClusters) clusters, nprobe=\(detector.nprobeFull)")
+
+let mlp: MlpDetector?
+if let m = MlpDetector(path: modelPath) {
+    mlp = m
+    print("MLP model loaded from \(modelPath)")
+} else {
+    mlp = nil
+    print("No MLP model found, using k-NN only")
+}
+
 print("Prefaulting pages...")
 detector.prefault()
 
@@ -76,7 +87,7 @@ let bootstrap = ServerBootstrap(group: group)
     .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
     .childChannelInitializer { channel in
         channel.pipeline.configureHTTPServerPipeline().flatMap {
-            channel.pipeline.addHandler(HttpHandler(detector: detector))
+            channel.pipeline.addHandler(HttpHandler(detector: detector, mlp: mlp))
         }
     }
     .childChannelOption(.socketOption(.so_reuseaddr), value: 1)

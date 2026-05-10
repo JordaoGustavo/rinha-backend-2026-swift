@@ -78,12 +78,12 @@ public final class IvfDetector: @unchecked Sendable {
             throw IvfError.versionMismatch(Int(version), Int(IvfBinaryFormat.version))
         }
 
-        self.numVectors = Int(headerPtr[2])
-        self.numClusters = Int(headerPtr[3])
-        self.totalSlots = Int(headerPtr[4])
+        self.numVectors = Int(headerPtr[2])   // offset 8
+        self.numClusters = Int(headerPtr[3])  // offset 12
+        self.totalSlots = Int(headerPtr[9])   // offset 36
 
-        // nprobeFull from header, env override
-        var nprobe = Int(headerPtr[5])
+        // nprobeFull from header (offset 28), env override
+        var nprobe = Int(headerPtr[7])
         if let envVal = ProcessInfo.processInfo.environment["NPROBE_FULL"],
            let override = Int(envVal), override > 0 {
             nprobe = override
