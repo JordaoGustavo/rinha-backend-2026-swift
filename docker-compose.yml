@@ -1,0 +1,75 @@
+services:
+  lb:
+    image: haproxy:3.1-alpine
+    restart: always
+    depends_on:
+      - api1
+      - api2
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sock:/run/sock
+    ports:
+      - "9999:9999"
+    cpuset: "0"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: "16MB"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
+    networks:
+      - rinha
+
+  api1:
+    image: ghcr.io/jordaogustavo/rinha-api-swift:latest
+    environment:
+      - INDEX_PATH=/data/ivf.bin
+      - EXACT_PATH=/data/exact.bin
+      - RESOURCES_PATH=/resources
+      - SOCKET_PATH=/run/sock/api1.sock
+      - NPROBE_FULL=5
+    volumes:
+      - sock:/run/sock
+    cpuset: "1,2"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.40"
+          memory: "162MB"
+    networks:
+      - rinha
+
+  api2:
+    image: ghcr.io/jordaogustavo/rinha-api-swift:latest
+    environment:
+      - INDEX_PATH=/data/ivf.bin
+      - EXACT_PATH=/data/exact.bin
+      - RESOURCES_PATH=/resources
+      - SOCKET_PATH=/run/sock/api2.sock
+      - NPROBE_FULL=5
+    volumes:
+      - sock:/run/sock
+    cpuset: "2,3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.40"
+          memory: "162MB"
+    networks:
+      - rinha
+
+volumes:
+  sock:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,nr_inodes=8,mode=0777,noatime,nosuid,nodev"
+
+networks:
+  rinha:
+    driver: bridge
