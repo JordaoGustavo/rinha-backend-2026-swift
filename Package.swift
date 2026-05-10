@@ -15,11 +15,13 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
-            ]
+            ],
+            path: "Sources/RinhaApp"
         ),
         .executableTarget(
             name: "Preprocessor",
-            dependencies: ["FraudDetector"]
+            dependencies: ["FraudDetector"],
+            path: "Sources/Preprocessor"
         ),
         .target(
             name: "FraudDetector",
@@ -28,15 +30,18 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
-            ]
+            ],
+            path: "Sources/FraudDetector"
         ),
         .target(
             name: "CSimd",
+            path: "Sources/CSimd",
             cSettings: [.unsafeFlags(["-O3"])]
         ),
         .testTarget(
             name: "FraudDetectorTests",
-            dependencies: ["FraudDetector"]
+            dependencies: ["FraudDetector"],
+            path: "Tests/FraudDetectorTests"
         ),
     ]
 )

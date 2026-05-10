@@ -10,8 +10,11 @@ RUN mkdir -p /resources \
  && curl -fsSL "$RESOURCES_BASE_URL/mcc_risk.json"      -o /resources/mcc_risk.json \
  && curl -fsSL "$RESOURCES_BASE_URL/normalization.json"  -o /resources/normalization.json
 
-COPY Package.swift .
-COPY Sources/ Sources/
+COPY Package.swift Package.resolved ./
+COPY Sources/CSimd/ Sources/CSimd/
+COPY Sources/FraudDetector/ Sources/FraudDetector/
+COPY Sources/Preprocessor/ Sources/Preprocessor/
+COPY Sources/RinhaApp/ Sources/RinhaApp/
 
 RUN swift build -c release --target Preprocessor
 
