@@ -15,6 +15,7 @@ COPY Sources/CSimd/ Sources/CSimd/
 COPY Sources/FraudDetector/ Sources/FraudDetector/
 COPY Sources/Preprocessor/ Sources/Preprocessor/
 COPY Sources/RinhaApp/ Sources/RinhaApp/
+RUN mkdir -p Tests/FraudDetectorTests
 
 RUN swift build -c release --target Preprocessor
 
