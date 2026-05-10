@@ -14,9 +14,13 @@ services:
     depends_on:
       - api1
       - api2
+    networks:
+      - rinha
 
   api1: &api
-    image: rinha/api-swift:latest
+    image: ghcr.io/jordaogustavo/rinha-api-swift:latest
+    security_opt:
+      - seccomp=unconfined
     environment:
       INDEX_PATH: /data/ivf.bin
       EXACT_PATH: /data/exact.bin
@@ -31,6 +35,8 @@ services:
         limits:
           cpus: "0.40"
           memory: "162M"
+    networks:
+      - rinha
 
   api2:
     <<: *api
@@ -47,4 +53,8 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: "size=1M"
+      o: "size=1M,nr_inodes=8,mode=0777,noatime,nosuid,nodev"
+
+networks:
+  rinha:
+    driver: bridge
