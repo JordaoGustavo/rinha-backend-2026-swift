@@ -14,6 +14,10 @@ public enum SimdDistance {
         Int32(csimd_int16_bbox_lower_bound(query, bboxMin, bboxMax))
     }
     @inline(__always)
+    public static func int16SoaBlockDistances(_ query: UnsafePointer<Int16>, _ block: UnsafePointer<Int16>, _ distances: UnsafeMutablePointer<Int32>) {
+        csimd_int16_soa_block_distances(query, block, distances)
+    }
+    @inline(__always)
     public static func float32L2Squared(_ a: UnsafePointer<Float>, _ b: UnsafePointer<Float>) -> Float {
         csimd_float32_l2_squared(a, b)
     }

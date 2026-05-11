@@ -36,7 +36,6 @@ public final class IvfDetector: @unchecked Sendable {
     private static let rerankK = 6
     private static let paddedDims = IvfBinaryFormat.paddedDims
     private static let blockVectors = IvfBinaryFormat.blockVectors
-    private static let earlyExitDimPairs = 4
 
     public init(ivfPath: String, exactPath: String? = nil) throws {
         let fd = open(ivfPath, O_RDONLY)
@@ -324,7 +323,7 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 
-    // MARK: - ScanCluster with early exit (direct SoA access)
+    // MARK: - ScanCluster with SIMD batch (8 vectors at once)
 
     @inline(__always)
     private func scanCluster(
@@ -337,44 +336,34 @@ public final class IvfDetector: @unchecked Sendable {
     ) {
         let blockSize = Self.blockVectors
         let pd = Self.paddedDims
-        let earlyExit = Self.earlyExitDimPairs
 
         let fullBlocks = clusterCount / blockSize
         let remainder = clusterCount % blockSize
+
+        var dists: (Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32) = (0,0,0,0,0,0,0,0)
 
         for b in 0..<fullBlocks {
             let blockBaseSlot = clusterOffset + b * blockSize
             let blockPtr = vectors.advanced(by: blockBaseSlot * pd)
 
-            for v in 0..<blockSize {
-                // Early exit: compute partial distance from first earlyExit dim-pairs
-                var partialDist: Int32 = 0
-                for kp in 0..<earlyExit {
-                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
-                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
-                    partialDist += d0 * d0 + d1 * d1
-                }
+            withUnsafeMutablePointer(to: &dists) { dp in
+                SimdDistance.int16SoaBlockDistances(query, blockPtr,
+                    UnsafeMutableRawPointer(dp).assumingMemoryBound(to: Int32.self))
+            }
 
-                if heapSize == k && partialDist >= heap[0].dist { continue }
-
-                // Compute remaining dim-pairs
-                var dist = partialDist
-                for kp in earlyExit..<(pd / 2) {
-                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
-                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
-                    dist += d0 * d0 + d1 * d1
-                }
-
-                let slot = blockBaseSlot + v
-                if heapSize < k {
-                    heap[heapSize] = Candidate(dist: dist, slot: slot)
-                    heapSize += 1
-                    if heapSize == k {
-                        buildMaxHeapCandidate(&heap, heapSize)
+            withUnsafePointer(to: &dists) { dp in
+                let d = UnsafeRawPointer(dp).assumingMemoryBound(to: Int32.self)
+                for v in 0..<blockSize {
+                    let dist = d[v]
+                    let slot = blockBaseSlot + v
+                    if heapSize < k {
+                        heap[heapSize] = Candidate(dist: dist, slot: slot)
+                        heapSize += 1
+                        if heapSize == k { buildMaxHeapCandidate(&heap, heapSize) }
+                    } else if dist < heap[0].dist {
+                        heap[0] = Candidate(dist: dist, slot: slot)
+                        siftDownCandidate(&heap, 0, heapSize)
                     }
-                } else if dist < heap[0].dist {
-                    heap[0] = Candidate(dist: dist, slot: slot)
-                    siftDownCandidate(&heap, 0, heapSize)
                 }
             }
         }
@@ -383,33 +372,24 @@ public final class IvfDetector: @unchecked Sendable {
             let blockBaseSlot = clusterOffset + fullBlocks * blockSize
             let blockPtr = vectors.advanced(by: blockBaseSlot * pd)
 
-            for v in 0..<remainder {
-                var partialDist: Int32 = 0
-                for kp in 0..<earlyExit {
-                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
-                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
-                    partialDist += d0 * d0 + d1 * d1
-                }
+            withUnsafeMutablePointer(to: &dists) { dp in
+                SimdDistance.int16SoaBlockDistances(query, blockPtr,
+                    UnsafeMutableRawPointer(dp).assumingMemoryBound(to: Int32.self))
+            }
 
-                if heapSize == k && partialDist >= heap[0].dist { continue }
-
-                var dist = partialDist
-                for kp in earlyExit..<(pd / 2) {
-                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
-                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
-                    dist += d0 * d0 + d1 * d1
-                }
-
-                let slot = blockBaseSlot + v
-                if heapSize < k {
-                    heap[heapSize] = Candidate(dist: dist, slot: slot)
-                    heapSize += 1
-                    if heapSize == k {
-                        buildMaxHeapCandidate(&heap, heapSize)
+            withUnsafePointer(to: &dists) { dp in
+                let d = UnsafeRawPointer(dp).assumingMemoryBound(to: Int32.self)
+                for v in 0..<remainder {
+                    let dist = d[v]
+                    let slot = blockBaseSlot + v
+                    if heapSize < k {
+                        heap[heapSize] = Candidate(dist: dist, slot: slot)
+                        heapSize += 1
+                        if heapSize == k { buildMaxHeapCandidate(&heap, heapSize) }
+                    } else if dist < heap[0].dist {
+                        heap[0] = Candidate(dist: dist, slot: slot)
+                        siftDownCandidate(&heap, 0, heapSize)
                     }
-                } else if dist < heap[0].dist {
-                    heap[0] = Candidate(dist: dist, slot: slot)
-                    siftDownCandidate(&heap, 0, heapSize)
                 }
             }
         }

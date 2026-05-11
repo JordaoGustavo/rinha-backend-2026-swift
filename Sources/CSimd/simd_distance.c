@@ -204,6 +204,48 @@ int csimd_int16_bbox_lower_bound(const int16_t *query,
 #endif
 
 /* ================================================================== */
+/*  int16 SoA block distances — 8 vectors at once (16 padded dims)     */
+/*                                                                     */
+/*  SoA layout: for each dim-pair kp, 16 consecutive int16 hold        */
+/*  [v0d0, v0d1, v1d0, v1d1, ..., v7d0, v7d1].                        */
+/*  Output: 8 x int32 L2 squared distances.                            */
+/* ================================================================== */
+
+#if CSIMD_X86 && defined(__AVX2__)
+
+void csimd_int16_soa_block_distances(const int16_t *query,
+                                     const int16_t *block,
+                                     int32_t *distances) {
+    __m256i acc = _mm256_setzero_si256();
+    for (int kp = 0; kp < 8; kp++) {
+        __m256i vq = _mm256_set1_epi32(*(const int32_t*)(query + kp * 2));
+        __m256i vb = _mm256_loadu_si256((const __m256i *)(block + kp * 16));
+        __m256i diff = _mm256_sub_epi16(vb, vq);
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(diff, diff));
+    }
+    _mm256_storeu_si256((__m256i *)distances, acc);
+}
+
+#else
+
+void csimd_int16_soa_block_distances(const int16_t *query,
+                                     const int16_t *block,
+                                     int32_t *distances) {
+    for (int v = 0; v < 8; v++) distances[v] = 0;
+    for (int kp = 0; kp < 8; kp++) {
+        int q0 = query[kp * 2];
+        int q1 = query[kp * 2 + 1];
+        for (int v = 0; v < 8; v++) {
+            int d0 = block[kp * 16 + v * 2] - q0;
+            int d1 = block[kp * 16 + v * 2 + 1] - q1;
+            distances[v] += d0 * d0 + d1 * d1;
+        }
+    }
+}
+
+#endif
+
+/* ================================================================== */
 /*  float32 L2 squared  (16 elements)                                  */
 /* ================================================================== */
 

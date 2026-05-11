@@ -64,40 +64,38 @@ public final class MlpDetector: @unchecked Sendable {
     }
 
     public func predict(vector: UnsafePointer<Float>, dims: Int) -> MlpResult {
-        var input = [Float](repeating: 0, count: dims)
-        for i in 0..<dims { input[i] = vector[i] }
+        let maxBuf = 512
+        return withUnsafeTemporaryAllocation(of: Float.self, capacity: maxBuf) { buf1 in
+            return withUnsafeTemporaryAllocation(of: Float.self, capacity: maxBuf) { buf2 in
+                var src = buf1.baseAddress!
+                var dst = buf2.baseAddress!
 
-        var current = input
+                for i in 0..<dims { src[i] = vector[i] }
 
-        for layer in 0..<numLayers {
-            let (inSize, outSize) = layerSizes[layer]
-            let w = weights[layer]
-            let b = biases[layer]
-            var output = [Float](repeating: 0, count: outSize)
-
-            for j in 0..<outSize {
-                var sum = b[j]
-                let wOff = j * inSize
-                for i in 0..<inSize {
-                    sum += current[i] * w[wOff + i]
+                for layer in 0..<numLayers {
+                    let (inSize, outSize) = layerSizes[layer]
+                    let isLast = layer == numLayers - 1
+                    weights[layer].withUnsafeBufferPointer { wBuf in
+                        biases[layer].withUnsafeBufferPointer { bBuf in
+                            let w = wBuf.baseAddress!
+                            let b = bBuf.baseAddress!
+                            for j in 0..<outSize {
+                                var sum = b[j]
+                                let wOff = j * inSize
+                                for i in 0..<inSize {
+                                    sum += src[i] * w[wOff + i]
+                                }
+                                dst[j] = isLast ? 1.0 / (1.0 + expf(-sum)) : (sum > 0 ? sum : 0)
+                            }
+                        }
+                    }
+                    let tmp = src; src = dst; dst = tmp
                 }
-                if layer < numLayers - 1 {
-                    output[j] = sum > 0 ? sum : 0  // ReLU
-                } else {
-                    output[j] = 1.0 / (1.0 + expf(-sum))  // Sigmoid
-                }
+
+                let prob = src[0]
+                let confidence = abs(prob - 0.5) * 2.0
+                return MlpResult(confident: confidence >= threshold, isFraud: prob >= 0.5, probability: prob)
             }
-            current = output
         }
-
-        let prob = current[0]
-        let confidence = abs(prob - 0.5) * 2.0
-        let isFraud = prob >= 0.5
-
-        return MlpResult(
-            confident: confidence >= threshold,
-            isFraud: isFraud,
-            probability: prob
-        )
     }
 }
