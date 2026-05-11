@@ -69,7 +69,7 @@ public final class RawServer: @unchecked Sendable {
 
         guard listen(fd, 2048) == 0 else { fatalError("listen() failed: \(errno)") }
 
-        let numWorkers = 16
+        let numWorkers = 64
         for _ in 0..<(numWorkers - 1) {
             let t = Thread { [self] in self.acceptLoop(fd) }
             t.stackSize = 256 * 1024
