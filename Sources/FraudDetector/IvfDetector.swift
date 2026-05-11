@@ -9,18 +9,15 @@ import Musl
 import Foundation
 
 public final class IvfDetector: @unchecked Sendable {
-    // --- IVF index mmap ---
     private let ivfBase: UnsafeMutableRawPointer
     private let ivfSize: Int
     private let ivfFd: Int32
 
-    // --- Header fields ---
     public let numVectors: Int
     public let numClusters: Int
     private let totalSlots: Int
     public let nprobeFull: Int
 
-    // --- Section pointers ---
     private let centroids: UnsafePointer<Int16>
     private let bboxMin: UnsafePointer<Int16>
     private let bboxMax: UnsafePointer<Int16>
@@ -29,60 +26,50 @@ public final class IvfDetector: @unchecked Sendable {
     private let labels: UnsafePointer<UInt8>
     private let originalIndices: UnsafePointer<Int32>
 
-    // --- Exact (float32) rerank mmap ---
     private let exactBase: UnsafeMutableRawPointer?
     private let exactSize: Int
     private let exactFd: Int32
     private let exactVectors: UnsafePointer<Float>?
     private let exactNumVectors: Int
 
-    // --- Constants ---
+    // Profile fast path
+    private let profileMask: [UInt8]
+    private let profileCount: [UInt16]
+    private let profileMinCount: Int
+    private let profileEnabled: Bool
+
     private static let topK = 5
     private static let rerankK = 6
     private static let paddedDims = IvfBinaryFormat.paddedDims
     private static let blockVectors = IvfBinaryFormat.blockVectors
+    private static let earlyExitDimPairs = 4
 
     public init(ivfPath: String, exactPath: String? = nil) throws {
-        // --- Open and mmap ivf.bin ---
         let fd = open(ivfPath, O_RDONLY)
-        guard fd >= 0 else {
-            throw IvfError.openFailed(ivfPath, errno)
-        }
+        guard fd >= 0 else { throw IvfError.openFailed(ivfPath, errno) }
 
         var st = stat()
-        guard fstat(fd, &st) == 0 else {
-            close(fd)
-            throw IvfError.statFailed(ivfPath, errno)
-        }
+        guard fstat(fd, &st) == 0 else { close(fd); throw IvfError.statFailed(ivfPath, errno) }
         let fileSize = Int(st.st_size)
-        guard fileSize >= IvfBinaryFormat.headerSize else {
-            close(fd)
-            throw IvfError.fileTooSmall(ivfPath)
-        }
+        guard fileSize >= IvfBinaryFormat.headerSize else { close(fd); throw IvfError.fileTooSmall(ivfPath) }
 
         guard let mapped = mmap(nil, fileSize, PROT_READ, MAP_PRIVATE, fd, 0),
-              mapped != MAP_FAILED else {
-            close(fd)
-            throw IvfError.mmapFailed(ivfPath, errno)
-        }
+              mapped != MAP_FAILED else { close(fd); throw IvfError.mmapFailed(ivfPath, errno) }
 
         self.ivfFd = fd
         self.ivfBase = mapped
         self.ivfSize = fileSize
 
-        // --- Parse header ---
         let headerPtr = mapped.assumingMemoryBound(to: UInt32.self)
-        // headerPtr[0..3] = magic (4 bytes), headerPtr[1] = version
         let version = headerPtr[1]
         guard version == IvfBinaryFormat.version else {
             throw IvfError.versionMismatch(Int(version), Int(IvfBinaryFormat.version))
         }
 
-        self.numVectors = Int(headerPtr[2])   // offset 8
-        self.numClusters = Int(headerPtr[3])  // offset 12
-        self.totalSlots = Int(headerPtr[9])   // offset 36
+        self.numVectors = Int(headerPtr[2])
+        self.numClusters = Int(headerPtr[3])
+        self.totalSlots = Int(headerPtr[9])
 
-        // nprobeFull from header (offset 28), env override
         var nprobe = Int(headerPtr[7])
         if let envVal = ProcessInfo.processInfo.environment["NPROBE_FULL"],
            let override = Int(envVal), override > 0 {
@@ -90,76 +77,68 @@ public final class IvfDetector: @unchecked Sendable {
         }
         self.nprobeFull = nprobe
 
-        // --- Set up section pointers ---
         let base = mapped
+        self.centroids = UnsafePointer(base.advanced(by: IvfBinaryFormat.centroidsOffset).assumingMemoryBound(to: Int16.self))
+        self.bboxMin = UnsafePointer(base.advanced(by: IvfBinaryFormat.bboxMinOffset(numClusters)).assumingMemoryBound(to: Int16.self))
+        self.bboxMax = UnsafePointer(base.advanced(by: IvfBinaryFormat.bboxMaxOffset(numClusters)).assumingMemoryBound(to: Int16.self))
+        self.clusterMeta = UnsafePointer(base.advanced(by: IvfBinaryFormat.clusterMetaOffset(numClusters)).assumingMemoryBound(to: IvfBinaryFormat.ClusterMeta.self))
+        self.vectors = UnsafePointer(base.advanced(by: IvfBinaryFormat.vectorsOffset(numClusters)).assumingMemoryBound(to: Int16.self))
+        self.labels = UnsafePointer(base.advanced(by: IvfBinaryFormat.labelsOffset(numClusters, totalSlots)).assumingMemoryBound(to: UInt8.self))
+        self.originalIndices = UnsafePointer(base.advanced(by: IvfBinaryFormat.originalIndicesOffset(numClusters, totalSlots)).assumingMemoryBound(to: Int32.self))
 
-        self.centroids = UnsafePointer(base
-            .advanced(by: IvfBinaryFormat.centroidsOffset)
-            .assumingMemoryBound(to: Int16.self))
-
-        self.bboxMin = UnsafePointer(base
-            .advanced(by: IvfBinaryFormat.bboxMinOffset(numClusters))
-            .assumingMemoryBound(to: Int16.self))
-
-        self.bboxMax = UnsafePointer(base
-            .advanced(by: IvfBinaryFormat.bboxMaxOffset(numClusters))
-            .assumingMemoryBound(to: Int16.self))
-
-        self.clusterMeta = UnsafePointer(base
-            .advanced(by: IvfBinaryFormat.clusterMetaOffset(numClusters))
-            .assumingMemoryBound(to: IvfBinaryFormat.ClusterMeta.self))
-
-        self.vectors = UnsafePointer(base
-            .advanced(by: IvfBinaryFormat.vectorsOffset(numClusters))
-            .assumingMemoryBound(to: Int16.self))
-
-        self.labels = UnsafePointer(base
-            .advanced(by: IvfBinaryFormat.labelsOffset(numClusters, totalSlots))
-            .assumingMemoryBound(to: UInt8.self))
-
-        self.originalIndices = UnsafePointer(base
-            .advanced(by: IvfBinaryFormat.originalIndicesOffset(numClusters, totalSlots))
-            .assumingMemoryBound(to: Int32.self))
-
-        // --- Open and mmap exact.bin (optional) ---
         if let exactPath = exactPath {
             let eFd = open(exactPath, O_RDONLY)
-            guard eFd >= 0 else {
-                throw IvfError.openFailed(exactPath, errno)
-            }
+            guard eFd >= 0 else { throw IvfError.openFailed(exactPath, errno) }
             var eSt = stat()
-            guard fstat(eFd, &eSt) == 0 else {
-                close(eFd)
-                throw IvfError.statFailed(exactPath, errno)
-            }
+            guard fstat(eFd, &eSt) == 0 else { close(eFd); throw IvfError.statFailed(exactPath, errno) }
             let eSize = Int(eSt.st_size)
             guard let eMapped = mmap(nil, eSize, PROT_READ, MAP_PRIVATE, eFd, 0),
-                  eMapped != MAP_FAILED else {
-                close(eFd)
-                throw IvfError.mmapFailed(exactPath, errno)
-            }
+                  eMapped != MAP_FAILED else { close(eFd); throw IvfError.mmapFailed(exactPath, errno) }
 
             let eHeader = eMapped.assumingMemoryBound(to: UInt32.self)
             let eVersion = eHeader[1]
             guard eVersion == ExactBinaryFormat.version else {
                 throw IvfError.versionMismatch(Int(eVersion), Int(ExactBinaryFormat.version))
             }
-
             let eNumVectors = Int(eHeader[2])
 
             self.exactFd = eFd
             self.exactBase = eMapped
             self.exactSize = eSize
             self.exactNumVectors = eNumVectors
-            self.exactVectors = UnsafePointer(eMapped
-                .advanced(by: ExactBinaryFormat.vectorsOffset)
-                .assumingMemoryBound(to: Float.self))
+            self.exactVectors = UnsafePointer(eMapped.advanced(by: ExactBinaryFormat.vectorsOffset).assumingMemoryBound(to: Float.self))
         } else {
             self.exactFd = -1
             self.exactBase = nil
             self.exactSize = 0
             self.exactNumVectors = 0
             self.exactVectors = nil
+        }
+
+        // Build profile fast path tables
+        let envProfile = ProcessInfo.processInfo.environment["PROFILE_FAST_PATH"] ?? "1"
+        self.profileEnabled = envProfile != "0"
+        self.profileMinCount = Int(ProcessInfo.processInfo.environment["PROFILE_MIN_COUNT"] ?? "30") ?? 30
+
+        if profileEnabled {
+            print("Building profile fast path tables...")
+            let tables = ProfileFastPath.build(
+                vectors: vectors, labels: labels, clusterMeta: clusterMeta,
+                numClusters: numClusters, paddedDims: Self.paddedDims, blockVectors: Self.blockVectors
+            )
+            self.profileMask = tables.mask
+            self.profileCount = tables.count
+
+            var legitHits = 0, fraudHits = 0, mixed = 0
+            for i in 0..<ProfileFastPath.keyCount {
+                if tables.mask[i] == ProfileFastPath.legitMask && tables.count[i] >= profileMinCount { legitHits += 1 }
+                else if tables.mask[i] == ProfileFastPath.fraudMask && tables.count[i] >= profileMinCount { fraudHits += 1 }
+                else if tables.mask[i] == 3 { mixed += 1 }
+            }
+            print("  Profile: \(legitHits) legit buckets, \(fraudHits) fraud buckets, \(mixed) mixed")
+        } else {
+            self.profileMask = []
+            self.profileCount = []
         }
     }
 
@@ -172,7 +151,6 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 
-    /// Prefault mmap pages into memory.
     public func prefault() {
         MmapHints.hintHugePages(ivfBase, ivfSize)
         MmapHints.hintWillNeed(ivfBase, ivfSize)
@@ -182,16 +160,15 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 
-    // MARK: - Public scoring
-
     public struct ScoreResult {
         public let approved: Bool
         public let fraudCount: Int
     }
 
-    /// Score a query vector. Returns (approved, fraudCount).
     public func score(_ queryFloat: UnsafePointer<Float>) -> ScoreResult {
-        // 1. Quantize float[16] -> int16[16]
+        let pd = Self.paddedDims
+
+        // Quantize float[16] -> int16[16]
         var queryQ = (
             Int16(0), Int16(0), Int16(0), Int16(0),
             Int16(0), Int16(0), Int16(0), Int16(0),
@@ -201,14 +178,28 @@ public final class IvfDetector: @unchecked Sendable {
         withUnsafeMutablePointer(to: &queryQ) { tuplePtr in
             let qPtr = UnsafeMutableRawPointer(tuplePtr).assumingMemoryBound(to: Int16.self)
             let scale = Float(IvfBinaryFormat.scale)
-            for i in 0..<Self.paddedDims {
-                let v = queryFloat[i] * scale
+            for i in 0..<pd {
+                let v = (queryFloat[i] * scale).rounded()
                 let clamped = max(Float(Int16.min), min(Float(Int16.max), v))
                 qPtr[i] = Int16(clamped)
             }
         }
 
-        // 2. Find top-rerankK nearest neighbors via IVF search
+        // Profile fast path
+        if profileEnabled {
+            let pkey = withUnsafePointer(to: &queryQ) { ptr in
+                ProfileFastPath.key(UnsafeRawPointer(ptr).assumingMemoryBound(to: Int16.self))
+            }
+            let pmask = profileMask[pkey]
+            if pmask == ProfileFastPath.legitMask && profileCount[pkey] >= profileMinCount {
+                return ScoreResult(approved: true, fraudCount: 0)
+            }
+            if pmask == ProfileFastPath.fraudMask && profileCount[pkey] >= profileMinCount {
+                return ScoreResult(approved: false, fraudCount: 5)
+            }
+        }
+
+        // Full IVF k-NN search
         var candidates = [(dist: Int32, slot: Int)](repeating: (Int32.max, -1), count: Self.rerankK)
         var candidateCount = 0
 
@@ -217,7 +208,7 @@ public final class IvfDetector: @unchecked Sendable {
             findKNearest(query: qPtr, results: &candidates, count: &candidateCount)
         }
 
-        // 3. Float32 rerank if exact vectors available
+        // Float32 rerank
         if let exactVecs = exactVectors {
             var rerankResults = [(dist: Float, label: UInt8)](repeating: (Float.greatestFiniteMagnitude, 0), count: Self.topK)
             var rerankCount = 0
@@ -232,7 +223,6 @@ public final class IvfDetector: @unchecked Sendable {
                 let fDist = SimdDistance.float32L2Squared(queryFloat, exactVec)
                 let label = labels[slot]
 
-                // Insertion sort into rerankResults
                 if rerankCount < Self.topK || fDist < rerankResults[rerankCount - 1].dist {
                     let insertAt: Int
                     if rerankCount < Self.topK {
@@ -242,7 +232,6 @@ public final class IvfDetector: @unchecked Sendable {
                         insertAt = Self.topK - 1
                     }
                     rerankResults[insertAt] = (fDist, label)
-                    // Bubble down
                     var j = insertAt
                     while j > 0, rerankResults[j].dist < rerankResults[j - 1].dist {
                         let tmp = rerankResults[j]
@@ -259,7 +248,6 @@ public final class IvfDetector: @unchecked Sendable {
             }
             return ScoreResult(approved: fraudCount < 3, fraudCount: fraudCount)
         } else {
-            // No rerank; use int16 results directly (top-5)
             var fraudCount = 0
             for i in 0..<min(candidateCount, Self.topK) {
                 let slot = candidates[i].slot
@@ -270,15 +258,13 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 
-    // MARK: - IVF search internals
+    // MARK: - IVF search
 
-    /// Max-heap entry for centroid distances.
     private struct HeapEntry {
         var dist: Int32
         var index: Int
     }
 
-    /// Candidate entry for nearest-neighbor results (max-heap by distance).
     private struct Candidate {
         var dist: Int32
         var slot: Int
@@ -291,14 +277,13 @@ public final class IvfDetector: @unchecked Sendable {
     ) {
         let k = Self.rerankK
 
-        // --- Phase 1: Centroid scan, keep top-nprobeFull closest centroids using max-heap ---
+        // Phase 1: Centroid scan
         var centroidHeap = [HeapEntry](repeating: HeapEntry(dist: 0, index: 0), count: nprobeFull)
         var centroidHeapSize = 0
         let centroidStride = Self.paddedDims
 
         for c in 0..<numClusters {
             let centroidPtr = centroids.advanced(by: c * centroidStride)
-            // Prefetch centroid c+8
             if c + 8 < numClusters {
                 SimdDistance.prefetch(UnsafeRawPointer(centroids.advanced(by: (c + 8) * centroidStride)))
             }
@@ -309,7 +294,6 @@ public final class IvfDetector: @unchecked Sendable {
                 centroidHeap[centroidHeapSize] = HeapEntry(dist: dist, index: c)
                 centroidHeapSize += 1
                 if centroidHeapSize == nprobeFull {
-                    // Build max-heap
                     buildMaxHeap(&centroidHeap, centroidHeapSize)
                 }
             } else if dist < centroidHeap[0].dist {
@@ -318,31 +302,26 @@ public final class IvfDetector: @unchecked Sendable {
             }
         }
 
-        // Collect probed cluster indices
         var probedSet = [Bool](repeating: false, count: numClusters)
         for i in 0..<centroidHeapSize {
             probedSet[centroidHeap[i].index] = true
         }
 
-        // --- Result max-heap for k-nearest ---
         var resultHeap = [Candidate](repeating: Candidate(dist: Int32.max, slot: -1), count: k)
         var resultHeapSize = 0
 
-        // --- Phase 2: Scan probed clusters ---
+        // Phase 2: Scan probed clusters
         for i in 0..<centroidHeapSize {
             let clusterIdx = centroidHeap[i].index
             let meta = clusterMeta[clusterIdx]
             let clusterCount = Int(meta.count)
             guard clusterCount > 0 else { continue }
 
-            // Bbox pruning: if lower bound > worst-K dist, skip
             if resultHeapSize == k {
                 let bboxMinPtr = bboxMin.advanced(by: clusterIdx * Self.paddedDims)
                 let bboxMaxPtr = bboxMax.advanced(by: clusterIdx * Self.paddedDims)
                 let lb = SimdDistance.int16BboxLowerBound(query, bboxMinPtr, bboxMaxPtr)
-                if lb > resultHeap[0].dist {
-                    continue
-                }
+                if lb > resultHeap[0].dist { continue }
             }
 
             scanCluster(
@@ -355,7 +334,7 @@ public final class IvfDetector: @unchecked Sendable {
             )
         }
 
-        // --- Phase 3: Bbox repair pass for non-probed clusters ---
+        // Phase 3: Bbox repair for non-probed clusters
         for c in 0..<numClusters {
             guard !probedSet[c] else { continue }
             let meta = clusterMeta[c]
@@ -366,9 +345,7 @@ public final class IvfDetector: @unchecked Sendable {
                 let bboxMinPtr = bboxMin.advanced(by: c * Self.paddedDims)
                 let bboxMaxPtr = bboxMax.advanced(by: c * Self.paddedDims)
                 let lb = SimdDistance.int16BboxLowerBound(query, bboxMinPtr, bboxMaxPtr)
-                if lb > resultHeap[0].dist {
-                    continue
-                }
+                if lb > resultHeap[0].dist { continue }
             }
 
             scanCluster(
@@ -381,7 +358,6 @@ public final class IvfDetector: @unchecked Sendable {
             )
         }
 
-        // --- Extract results in sorted order ---
         count = resultHeapSize
         for i in stride(from: resultHeapSize - 1, through: 0, by: -1) {
             results[i] = (resultHeap[0].dist, resultHeap[0].slot)
@@ -393,7 +369,7 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 
-    // MARK: - Cluster scan (SoA blocked layout, scalar path)
+    // MARK: - ScanCluster with early exit (direct SoA access)
 
     @inline(__always)
     private func scanCluster(
@@ -406,38 +382,32 @@ public final class IvfDetector: @unchecked Sendable {
     ) {
         let blockSize = Self.blockVectors
         let pd = Self.paddedDims
-        let vecStride = pd  // int16 elements per vector slot
+        let earlyExit = Self.earlyExitDimPairs
 
         let fullBlocks = clusterCount / blockSize
         let remainder = clusterCount % blockSize
 
         for b in 0..<fullBlocks {
             let blockBaseSlot = clusterOffset + b * blockSize
-            let blockPtr = vectors.advanced(by: blockBaseSlot * vecStride)
+            let blockPtr = vectors.advanced(by: blockBaseSlot * pd)
 
             for v in 0..<blockSize {
-                // Reconstruct the vector for slot v from SoA-blocked layout
-                var reconstructed = (
-                    Int16(0), Int16(0), Int16(0), Int16(0),
-                    Int16(0), Int16(0), Int16(0), Int16(0),
-                    Int16(0), Int16(0), Int16(0), Int16(0),
-                    Int16(0), Int16(0), Int16(0), Int16(0)
-                )
-                withUnsafeMutablePointer(to: &reconstructed) { rPtr in
-                    let rBuf = UnsafeMutableRawPointer(rPtr).assumingMemoryBound(to: Int16.self)
-                    // kp iterates over dimension pairs (0..7)
-                    // Within block, dim-pair kp has 16 int16 values:
-                    //   blockPtr[kp*16 + v*2 + 0] = dim kp*2
-                    //   blockPtr[kp*16 + v*2 + 1] = dim kp*2+1
-                    for kp in 0..<(pd / 2) {
-                        rBuf[kp * 2]     = blockPtr[kp * 16 + v * 2]
-                        rBuf[kp * 2 + 1] = blockPtr[kp * 16 + v * 2 + 1]
-                    }
+                // Early exit: compute partial distance from first earlyExit dim-pairs
+                var partialDist: Int32 = 0
+                for kp in 0..<earlyExit {
+                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
+                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
+                    partialDist += d0 * d0 + d1 * d1
                 }
 
-                let dist = withUnsafePointer(to: &reconstructed) { rPtr in
-                    let rBuf = UnsafeRawPointer(rPtr).assumingMemoryBound(to: Int16.self)
-                    return SimdDistance.int16L2Squared(query, rBuf)
+                if heapSize == k && partialDist >= heap[0].dist { continue }
+
+                // Compute remaining dim-pairs
+                var dist = partialDist
+                for kp in earlyExit..<(pd / 2) {
+                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
+                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
+                    dist += d0 * d0 + d1 * d1
                 }
 
                 let slot = blockBaseSlot + v
@@ -454,29 +424,25 @@ public final class IvfDetector: @unchecked Sendable {
             }
         }
 
-        // Handle remainder vectors (partial last block)
         if remainder > 0 {
             let blockBaseSlot = clusterOffset + fullBlocks * blockSize
-            let blockPtr = vectors.advanced(by: blockBaseSlot * vecStride)
+            let blockPtr = vectors.advanced(by: blockBaseSlot * pd)
 
             for v in 0..<remainder {
-                var reconstructed = (
-                    Int16(0), Int16(0), Int16(0), Int16(0),
-                    Int16(0), Int16(0), Int16(0), Int16(0),
-                    Int16(0), Int16(0), Int16(0), Int16(0),
-                    Int16(0), Int16(0), Int16(0), Int16(0)
-                )
-                withUnsafeMutablePointer(to: &reconstructed) { rPtr in
-                    let rBuf = UnsafeMutableRawPointer(rPtr).assumingMemoryBound(to: Int16.self)
-                    for kp in 0..<(pd / 2) {
-                        rBuf[kp * 2]     = blockPtr[kp * 16 + v * 2]
-                        rBuf[kp * 2 + 1] = blockPtr[kp * 16 + v * 2 + 1]
-                    }
+                var partialDist: Int32 = 0
+                for kp in 0..<earlyExit {
+                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
+                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
+                    partialDist += d0 * d0 + d1 * d1
                 }
 
-                let dist = withUnsafePointer(to: &reconstructed) { rPtr in
-                    let rBuf = UnsafeRawPointer(rPtr).assumingMemoryBound(to: Int16.self)
-                    return SimdDistance.int16L2Squared(query, rBuf)
+                if heapSize == k && partialDist >= heap[0].dist { continue }
+
+                var dist = partialDist
+                for kp in earlyExit..<(pd / 2) {
+                    let d0 = Int32(query[kp * 2])     - Int32(blockPtr[kp * 16 + v * 2])
+                    let d1 = Int32(query[kp * 2 + 1]) - Int32(blockPtr[kp * 16 + v * 2 + 1])
+                    dist += d0 * d0 + d1 * d1
                 }
 
                 let slot = blockBaseSlot + v
@@ -494,15 +460,12 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 
-    // MARK: - Max-heap helpers (HeapEntry — centroid scan)
+    // MARK: - Heap helpers
 
     @inline(__always)
     private func buildMaxHeap(_ heap: inout [HeapEntry], _ n: Int) {
         var i = n / 2 - 1
-        while i >= 0 {
-            siftDown(&heap, i, n)
-            i -= 1
-        }
+        while i >= 0 { siftDown(&heap, i, n); i -= 1 }
     }
 
     @inline(__always)
@@ -510,8 +473,7 @@ public final class IvfDetector: @unchecked Sendable {
         var i = root
         while true {
             var largest = i
-            let left = 2 * i + 1
-            let right = 2 * i + 2
+            let left = 2 * i + 1, right = 2 * i + 2
             if left < n, heap[left].dist > heap[largest].dist { largest = left }
             if right < n, heap[right].dist > heap[largest].dist { largest = right }
             if largest == i { break }
@@ -520,15 +482,10 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 
-    // MARK: - Max-heap helpers (Candidate — result heap)
-
     @inline(__always)
     private func buildMaxHeapCandidate(_ heap: inout [Candidate], _ n: Int) {
         var i = n / 2 - 1
-        while i >= 0 {
-            siftDownCandidate(&heap, i, n)
-            i -= 1
-        }
+        while i >= 0 { siftDownCandidate(&heap, i, n); i -= 1 }
     }
 
     @inline(__always)
@@ -536,8 +493,7 @@ public final class IvfDetector: @unchecked Sendable {
         var i = root
         while true {
             var largest = i
-            let left = 2 * i + 1
-            let right = 2 * i + 2
+            let left = 2 * i + 1, right = 2 * i + 2
             if left < n, heap[left].dist > heap[largest].dist { largest = left }
             if right < n, heap[right].dist > heap[largest].dist { largest = right }
             if largest == i { break }
@@ -546,8 +502,6 @@ public final class IvfDetector: @unchecked Sendable {
         }
     }
 }
-
-// MARK: - Error type
 
 public enum IvfError: Error, CustomStringConvertible {
     case openFailed(String, Int32)
@@ -558,16 +512,11 @@ public enum IvfError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .openFailed(let path, let err):
-            return "Failed to open '\(path)': errno=\(err)"
-        case .statFailed(let path, let err):
-            return "Failed to stat '\(path)': errno=\(err)"
-        case .fileTooSmall(let path):
-            return "File too small for IVF header: '\(path)'"
-        case .mmapFailed(let path, let err):
-            return "Failed to mmap '\(path)': errno=\(err)"
-        case .versionMismatch(let got, let expected):
-            return "Version mismatch: got \(got), expected \(expected)"
+        case .openFailed(let path, let err): return "Failed to open '\(path)': errno=\(err)"
+        case .statFailed(let path, let err): return "Failed to stat '\(path)': errno=\(err)"
+        case .fileTooSmall(let path): return "File too small for IVF header: '\(path)'"
+        case .mmapFailed(let path, let err): return "Failed to mmap '\(path)': errno=\(err)"
+        case .versionMismatch(let got, let expected): return "Version mismatch: got \(got), expected \(expected)"
         }
     }
 }

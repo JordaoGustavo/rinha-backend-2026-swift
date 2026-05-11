@@ -8,18 +8,11 @@ let package = Package(
         .executable(name: "RinhaApp", targets: ["RinhaApp"]),
         .executable(name: "Preprocessor", targets: ["Preprocessor"]),
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
-    ],
+    dependencies: [],
     targets: [
         .executableTarget(
             name: "RinhaApp",
-            dependencies: [
-                "FraudDetector",
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
-            ],
+            dependencies: ["FraudDetector"],
             path: "Sources/RinhaApp"
         ),
         .executableTarget(
@@ -30,18 +23,16 @@ let package = Package(
         ),
         .target(
             name: "FraudDetector",
-            dependencies: [
-                "CSimd",
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
-            ],
+            dependencies: ["CSimd"],
             path: "Sources/FraudDetector"
         ),
         .target(
             name: "CSimd",
             path: "Sources/CSimd",
-            cSettings: [.unsafeFlags(["-O3"])]
+            cSettings: [
+                .unsafeFlags(["-O3"]),
+                .unsafeFlags(["-mavx2", "-mfma"], .when(platforms: [.linux])),
+            ]
         ),
         .testTarget(
             name: "FraudDetectorTests",

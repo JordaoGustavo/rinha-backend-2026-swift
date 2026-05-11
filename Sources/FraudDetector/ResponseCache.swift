@@ -1,5 +1,3 @@
-import NIOCore
-
 public final class ResponseCache: @unchecked Sendable {
     private let outcomes: [[UInt8]]
     public let ready: [UInt8]

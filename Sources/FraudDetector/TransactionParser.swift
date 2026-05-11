@@ -5,10 +5,10 @@ public enum TransactionParser {
     private static let fnvPrime: UInt64 = 1099511628211
 
     @inline(__always)
-    private static func fnv1a(_ string: String) -> UInt64 {
+    private static func fnv1a(_ bytes: UnsafePointer<UInt8>, _ len: Int) -> UInt64 {
         var hash = fnvOffsetBasis
-        for byte in string.utf8 {
-            hash ^= UInt64(byte)
+        for i in 0..<len {
+            hash ^= UInt64(bytes[i])
             hash &*= fnvPrime
         }
         return hash
@@ -39,67 +39,218 @@ public enum TransactionParser {
         return (h + 5) % 7
     }
 
-    /// Parse transaction JSON (nested format) and produce a 14-dim float vector (padded to 16).
-    /// Dimensions are variance-reordered to match the reference implementation:
-    /// [0]=kmCurrent [1]=cardPresent [2]=isOnline [3]=minsSinceLastTx
-    /// [4]=unknownMerchant [5]=amtRatio [6]=dayOfWeek [7]=kmHome
-    /// [8]=txAmount [9]=installments [10]=txCount24h [11]=mccRisk [12]=txHour [13]=merchAvg
     public static func parse(_ json: UnsafeRawBufferPointer, into vector: UnsafeMutablePointer<Float>) {
         for i in 0..<16 { vector[i] = 0 }
-        guard json.count > 0 else { return }
+        guard let baseAddr = json.baseAddress, json.count > 0 else { return }
+        let bytes = baseAddr.assumingMemoryBound(to: UInt8.self)
+        let len = json.count
 
-        let data = Data(bytes: json.baseAddress!, count: json.count)
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        var txAmount: Double = 0
+        var txInstallments: Double = 0
+        var txYear = 0, txMonth = 0, txDay = 0, txHour = 0, txMinute = 0, txSecond = 0
 
-        let transaction = obj["transaction"] as? [String: Any]
-        let customer = obj["customer"] as? [String: Any]
-        let merchant = obj["merchant"] as? [String: Any]
-        let terminal = obj["terminal"] as? [String: Any]
-        let lastTransaction = obj["last_transaction"] as? [String: Any]
+        var custAvgAmount: Double = 0
+        var custTxCount24h: Double = 0
 
-        let txAmount = (transaction?["amount"] as? NSNumber)?.doubleValue ?? 0
-        let txInstallments = (transaction?["installments"] as? NSNumber)?.doubleValue ?? 0
-        let requestedAt = transaction?["requested_at"] as? String ?? ""
-
-        let custAvgAmount = (customer?["avg_amount"] as? NSNumber)?.doubleValue ?? 0
-        let custTxCount24h = (customer?["tx_count_24h"] as? NSNumber)?.doubleValue ?? 0
-        let knownMerchants = customer?["known_merchants"] as? [String] ?? []
-
-        let merchantId = merchant?["id"] as? String ?? ""
-        let merchantMccRaw = merchant?["mcc"]
-        let merchantAvgAmount = (merchant?["avg_amount"] as? NSNumber)?.doubleValue ?? 0
-
-        let isOnline = (terminal?["is_online"] as? NSNumber)?.boolValue ?? false
-        let cardPresent = (terminal?["card_present"] as? NSNumber)?.boolValue ?? false
-        let kmFromHome = (terminal?["km_from_home"] as? NSNumber)?.doubleValue ?? 0
+        var knownHashes = (
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0)
+        )
+        var knownCount = 0
+        var merchantIdHash: UInt64 = 0
+        var hasMerchantId = false
 
         var merchantMcc = -1
-        if let mccStr = merchantMccRaw as? String, let v = Int(mccStr) {
-            merchantMcc = v
-        }
+        var merchantAvgAmount: Double = 0
 
-        var txYear = 0, txMonth = 0, txDay = 0, txHour = 0, txMinute = 0, txSecond = 0
-        parseTimestamp(requestedAt, &txYear, &txMonth, &txDay, &txHour, &txMinute, &txSecond)
+        var isOnline = false
+        var cardPresent = false
+        var kmFromHome: Double = 0
 
-        let dow = dayOfWeekMonBased(year: txYear, month: txMonth, day: txDay)
+        var hasLastTx = false
+        var lastYear = 0, lastMonth = 0, lastDay = 0, lastHour = 0, lastMinute = 0, lastSecond = 0
+        var lastKmFromCurrent: Double = 0
 
-        let merchantHash = fnv1a(merchantId)
-        var isUnknown = true
-        for km in knownMerchants {
-            if fnv1a(km) == merchantHash {
-                isUnknown = false
-                break
+        // ctx: 0=root, 1=transaction, 2=customer, 3=merchant, 4=terminal, 5=last_transaction
+        var ctx = 0
+        var fieldId = 0
+        var inKnownMerchants = false
+        var rootFieldId = 0
+        var pos = 0
+
+        while pos < len {
+            let ch = bytes[pos]
+            if ch <= 0x20 { pos += 1; continue }
+
+            switch ch {
+            case 0x7B: // {
+                if ctx == 0 {
+                    switch fieldId {
+                    case 10: ctx = 1
+                    case 11: ctx = 2
+                    case 12: ctx = 3
+                    case 13: ctx = 4
+                    case 14: ctx = 5; hasLastTx = true
+                    default: break
+                    }
+                }
+                fieldId = 0
+                pos += 1
+
+            case 0x7D: // }
+                if ctx != 0 { ctx = 0 }
+                pos += 1
+
+            case 0x5B: // [
+                if ctx == 2 && fieldId == 6 {
+                    inKnownMerchants = true
+                    fieldId = 0
+                }
+                pos += 1
+
+            case 0x5D: // ]
+                inKnownMerchants = false
+                pos += 1
+
+            case 0x22: // "
+                pos += 1
+                let strStart = pos
+                while pos < len && bytes[pos] != 0x22 { pos += 1 }
+                let strEnd = pos
+                pos += 1
+
+                var nextPos = pos
+                while nextPos < len && bytes[nextPos] <= 0x20 { nextPos += 1 }
+
+                if nextPos < len && bytes[nextPos] == 0x3A { // :  → property name
+                    pos = nextPos + 1
+                    fieldId = 0
+                    let sLen = strEnd - strStart
+                    if ctx == 0 {
+                        if sLen == 11 && matchBytes(bytes + strStart, "transaction", 11)      { fieldId = 10; rootFieldId = 10 }
+                        else if sLen == 8 && matchBytes(bytes + strStart, "customer", 8)       { fieldId = 11; rootFieldId = 11 }
+                        else if sLen == 8 && matchBytes(bytes + strStart, "merchant", 8)       { fieldId = 12; rootFieldId = 12 }
+                        else if sLen == 8 && matchBytes(bytes + strStart, "terminal", 8)       { fieldId = 13; rootFieldId = 13 }
+                        else if sLen == 16 && matchBytes(bytes + strStart, "last_transaction", 16) { fieldId = 14; rootFieldId = 14 }
+                    } else if ctx == 1 {
+                        if sLen == 6 && matchBytes(bytes + strStart, "amount", 6)         { fieldId = 1 }
+                        else if sLen == 12 && matchBytes(bytes + strStart, "installments", 12) { fieldId = 2 }
+                        else if sLen == 12 && matchBytes(bytes + strStart, "requested_at", 12) { fieldId = 3 }
+                    } else if ctx == 2 {
+                        if sLen == 10 && matchBytes(bytes + strStart, "avg_amount", 10)        { fieldId = 4 }
+                        else if sLen == 12 && matchBytes(bytes + strStart, "tx_count_24h", 12) { fieldId = 5 }
+                        else if sLen == 15 && matchBytes(bytes + strStart, "known_merchants", 15) { fieldId = 6 }
+                    } else if ctx == 3 {
+                        if sLen == 2 && matchBytes(bytes + strStart, "id", 2)          { fieldId = 7 }
+                        else if sLen == 3 && matchBytes(bytes + strStart, "mcc", 3)    { fieldId = 8 }
+                        else if sLen == 10 && matchBytes(bytes + strStart, "avg_amount", 10) { fieldId = 9 }
+                    } else if ctx == 4 {
+                        if sLen == 9 && matchBytes(bytes + strStart, "is_online", 9)     { fieldId = 15 }
+                        else if sLen == 12 && matchBytes(bytes + strStart, "card_present", 12) { fieldId = 16 }
+                        else if sLen == 12 && matchBytes(bytes + strStart, "km_from_home", 12) { fieldId = 17 }
+                    } else if ctx == 5 {
+                        if sLen == 9 && matchBytes(bytes + strStart, "timestamp", 9)        { fieldId = 18 }
+                        else if sLen == 15 && matchBytes(bytes + strStart, "km_from_current", 15) { fieldId = 19 }
+                    }
+                } else {
+                    // String value
+                    if inKnownMerchants {
+                        if knownCount < 32 {
+                            let hash = fnv1a(bytes + strStart, strEnd - strStart)
+                            withUnsafeMutablePointer(to: &knownHashes) { ptr in
+                                let base = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: UInt64.self)
+                                base[knownCount] = hash
+                            }
+                            knownCount += 1
+                        }
+                    } else if ctx == 1 && fieldId == 3 {
+                        parseTimestamp(bytes + strStart, strEnd - strStart, &txYear, &txMonth, &txDay, &txHour, &txMinute, &txSecond)
+                    } else if ctx == 3 && fieldId == 7 {
+                        merchantIdHash = fnv1a(bytes + strStart, strEnd - strStart)
+                        hasMerchantId = true
+                    } else if ctx == 3 && fieldId == 8 {
+                        merchantMcc = parseIntFromBytes(bytes + strStart, strEnd - strStart)
+                    } else if ctx == 5 && fieldId == 18 {
+                        parseTimestamp(bytes + strStart, strEnd - strStart, &lastYear, &lastMonth, &lastDay, &lastHour, &lastMinute, &lastSecond)
+                    }
+                }
+
+            case 0x6E: // 'n' for null
+                if ctx == 0 && rootFieldId == 14 { hasLastTx = false }
+                pos += 4
+
+            case 0x74: // 't' for true
+                if ctx == 4 {
+                    if fieldId == 15 { isOnline = true }
+                    else if fieldId == 16 { cardPresent = true }
+                }
+                pos += 4
+
+            case 0x66: // 'f' for false
+                if ctx == 4 {
+                    if fieldId == 15 { isOnline = false }
+                    else if fieldId == 16 { cardPresent = false }
+                }
+                pos += 5
+
+            case 0x2C: // ,
+                pos += 1
+
+            case 0x3A: // :
+                pos += 1
+
+            default:
+                // Number
+                if (ch >= 0x30 && ch <= 0x39) || ch == 0x2D || ch == 0x2E {
+                    let numStart = pos
+                    pos += 1
+                    while pos < len {
+                        let nc = bytes[pos]
+                        if (nc >= 0x30 && nc <= 0x39) || nc == 0x2E || nc == 0x2D || nc == 0x65 || nc == 0x45 || nc == 0x2B {
+                            pos += 1
+                        } else {
+                            break
+                        }
+                    }
+                    let numVal = parseDouble(bytes + numStart, pos - numStart)
+
+                    switch ctx {
+                    case 1:
+                        if fieldId == 1 { txAmount = numVal }
+                        else if fieldId == 2 { txInstallments = numVal }
+                    case 2:
+                        if fieldId == 4 { custAvgAmount = numVal }
+                        else if fieldId == 5 { custTxCount24h = numVal }
+                    case 3:
+                        if fieldId == 9 { merchantAvgAmount = numVal }
+                    case 4:
+                        if fieldId == 17 { kmFromHome = numVal }
+                    case 5:
+                        if fieldId == 19 { lastKmFromCurrent = numVal }
+                    default: break
+                    }
+                } else {
+                    pos += 1
+                }
             }
         }
 
-        // [0] kmFromCurrent, [3] minsSinceLastTx
-        if let lastTx = lastTransaction {
-            let lastTs = lastTx["timestamp"] as? String ?? ""
-            let kmFromCurrent = (lastTx["km_from_current"] as? NSNumber)?.doubleValue ?? 0
+        // Compute feature vector
+        let dow = dayOfWeekMonBased(year: txYear, month: txMonth, day: txDay)
 
-            var lastYear = 0, lastMonth = 0, lastDay = 0, lastHour = 0, lastMinute = 0, lastSecond = 0
-            parseTimestamp(lastTs, &lastYear, &lastMonth, &lastDay, &lastHour, &lastMinute, &lastSecond)
+        var isUnknown = true
+        if hasMerchantId && knownCount > 0 {
+            withUnsafePointer(to: &knownHashes) { ptr in
+                let base = UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt64.self)
+                for i in 0..<knownCount {
+                    if base[i] == merchantIdHash { isUnknown = false; return }
+                }
+            }
+        }
 
+        if hasLastTx {
             let minutes: Double
             if txYear == lastYear && txMonth == lastMonth {
                 let deltaSec = (txDay - lastDay) * 86400
@@ -112,78 +263,120 @@ public enum TransactionParser {
                 let lastTotal = totalSeconds(lastYear, lastMonth, lastDay, lastHour, lastMinute, lastSecond)
                 minutes = Double(txTotal - lastTotal) / 60.0
             }
-
-            vector[0] = round4(clamp01(kmFromCurrent / MccRisk.maxKm))
+            vector[0] = round4(clamp01(lastKmFromCurrent / MccRisk.maxKm))
             vector[3] = round4(clamp01(minutes / MccRisk.maxMinutes))
         } else {
             vector[0] = -1.0
             vector[3] = -1.0
         }
 
-        // [1] cardPresent
         vector[1] = cardPresent ? 1.0 : 0.0
-
-        // [2] isOnline
         vector[2] = isOnline ? 1.0 : 0.0
-
-        // [4] unknownMerchant
         vector[4] = isUnknown ? 1.0 : 0.0
 
-        // [5] amountRatio
         if custAvgAmount == 0 {
             vector[5] = 1.0
         } else {
             vector[5] = round4(clamp01((txAmount / custAvgAmount) / MccRisk.amountVsAvgRatio))
         }
 
-        // [6] dayOfWeek / 6
         vector[6] = round4(Double(dow) / 6.0)
-
-        // [7] kmFromHome / maxKm
         vector[7] = round4(clamp01(kmFromHome / MccRisk.maxKm))
-
-        // [8] txAmount / maxAmount
         vector[8] = round4(clamp01(txAmount / MccRisk.maxAmount))
-
-        // [9] installments / maxInstallments
         vector[9] = round4(clamp01(txInstallments / MccRisk.maxInstallments))
-
-        // [10] txCount24h / maxTxCount24h
         vector[10] = round4(clamp01(custTxCount24h / MccRisk.maxTxCount24h))
-
-        // [11] mccRisk
         vector[11] = MccRisk.risk(for: merchantMcc)
-
-        // [12] txHour / 23
         vector[12] = round4(Double(txHour) / 23.0)
-
-        // [13] merchantAvgAmount / maxMerchantAvgAmount
         vector[13] = round4(clamp01(merchantAvgAmount / MccRisk.maxMerchantAvgAmount))
     }
 
     @inline(__always)
-    private static func parseTimestamp(_ ts: String, _ year: inout Int, _ month: inout Int, _ day: inout Int, _ hour: inout Int, _ minute: inout Int, _ second: inout Int) {
-        let bytes = Array(ts.utf8)
-        guard bytes.count >= 19 else { return }
-        year = parseInt(bytes, 0, 4)
-        month = parseInt(bytes, 5, 2)
-        day = parseInt(bytes, 8, 2)
-        hour = parseInt(bytes, 11, 2)
-        minute = parseInt(bytes, 14, 2)
-        second = parseInt(bytes, 17, 2)
+    private static func matchBytes(_ ptr: UnsafePointer<UInt8>, _ expected: StaticString, _ len: Int) -> Bool {
+        expected.withUTF8Buffer { buf in
+            memcmp(ptr, buf.baseAddress!, len) == 0
+        }
     }
 
     @inline(__always)
-    private static func parseInt(_ bytes: [UInt8], _ start: Int, _ length: Int) -> Int {
+    private static func parseTimestamp(_ ptr: UnsafePointer<UInt8>, _ len: Int,
+                                       _ year: inout Int, _ month: inout Int, _ day: inout Int,
+                                       _ hour: inout Int, _ minute: inout Int, _ second: inout Int) {
+        guard len >= 19 else { return }
+        year   = dig(ptr[0]) * 1000 + dig(ptr[1]) * 100 + dig(ptr[2]) * 10 + dig(ptr[3])
+        month  = dig(ptr[5]) * 10 + dig(ptr[6])
+        day    = dig(ptr[8]) * 10 + dig(ptr[9])
+        hour   = dig(ptr[11]) * 10 + dig(ptr[12])
+        minute = dig(ptr[14]) * 10 + dig(ptr[15])
+        second = dig(ptr[17]) * 10 + dig(ptr[18])
+    }
+
+    @inline(__always)
+    private static func dig(_ b: UInt8) -> Int { Int(b) - 48 }
+
+    @inline(__always)
+    private static func parseIntFromBytes(_ ptr: UnsafePointer<UInt8>, _ len: Int) -> Int {
         var result = 0
-        for i in start..<(start + length) {
-            guard i < bytes.count else { break }
-            let digit = Int(bytes[i]) - 48
-            if digit >= 0 && digit <= 9 {
-                result = result * 10 + digit
-            }
+        for i in 0..<len {
+            let d = Int(ptr[i]) - 48
+            guard d >= 0 && d <= 9 else { return -1 }
+            result = result * 10 + d
         }
         return result
+    }
+
+    @inline(__always)
+    private static func parseDouble(_ ptr: UnsafePointer<UInt8>, _ len: Int) -> Double {
+        var result: Double = 0
+        var i = 0
+        var negative = false
+
+        if i < len && ptr[i] == 0x2D { negative = true; i += 1 }
+
+        while i < len {
+            let d = Int(ptr[i]) - 48
+            guard d >= 0 && d <= 9 else { break }
+            result = result * 10 + Double(d)
+            i += 1
+        }
+
+        if i < len && ptr[i] == 0x2E {
+            i += 1
+            var frac: Double = 0
+            var divisor: Double = 1
+            while i < len {
+                let d = Int(ptr[i]) - 48
+                guard d >= 0 && d <= 9 else { break }
+                frac = frac * 10 + Double(d)
+                divisor *= 10
+                i += 1
+            }
+            result += frac / divisor
+        }
+
+        if i < len && (ptr[i] == 0x65 || ptr[i] == 0x45) {
+            i += 1
+            var expNeg = false
+            if i < len && ptr[i] == 0x2D { expNeg = true; i += 1 }
+            else if i < len && ptr[i] == 0x2B { i += 1 }
+            var exp = 0
+            while i < len {
+                let d = Int(ptr[i]) - 48
+                guard d >= 0 && d <= 9 else { break }
+                exp = exp * 10 + d
+                i += 1
+            }
+            if expNeg {
+                var div: Double = 1
+                for _ in 0..<exp { div *= 10 }
+                result /= div
+            } else {
+                var mul: Double = 1
+                for _ in 0..<exp { mul *= 10 }
+                result *= mul
+            }
+        }
+
+        return negative ? -result : result
     }
 
     private static let cumulativeDays = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]

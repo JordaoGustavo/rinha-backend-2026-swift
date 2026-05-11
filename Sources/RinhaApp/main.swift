@@ -1,7 +1,4 @@
 import Foundation
-import NIOCore
-import NIOPosix
-import NIOHTTP1
 import FraudDetector
 
 let resourcesPath = ProcessInfo.processInfo.environment["RESOURCES_PATH"] ?? "/resources"
@@ -12,7 +9,6 @@ try MccRisk.initialize(
 
 let dataPath = ProcessInfo.processInfo.environment["INDEX_PATH"] ?? "/data/ivf.bin"
 let exactPath = ProcessInfo.processInfo.environment["EXACT_PATH"]
-let modelPath = ProcessInfo.processInfo.environment["MODEL_PATH"] ?? resourcesPath + "/model.bin"
 let socketPath = ProcessInfo.processInfo.environment["SOCKET_PATH"]
 let port = Int(ProcessInfo.processInfo.environment["API_PORT"] ?? "8080") ?? 8080
 
@@ -25,15 +21,6 @@ if let ep = exactPath, FileManager.default.fileExists(atPath: ep) {
     detector = try IvfDetector(ivfPath: dataPath)
 }
 print("Loaded \(detector.numVectors) vectors, \(detector.numClusters) clusters, nprobe=\(detector.nprobeFull)")
-
-let mlp: MlpDetector?
-if let m = MlpDetector(path: modelPath) {
-    mlp = m
-    print("MLP model loaded from \(modelPath)")
-} else {
-    mlp = nil
-    print("No MLP model found, using k-NN only")
-}
 
 print("Prefaulting pages...")
 detector.prefault()
@@ -79,35 +66,5 @@ if warmedReal < warmupIterations {
 }
 print("Ready.")
 
-let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
-defer { try? group.syncShutdownGracefully() }
-
-let bootstrap = ServerBootstrap(group: group)
-    .serverChannelOption(.backlog, value: 2048)
-    .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
-    .childChannelInitializer { channel in
-        channel.pipeline.configureHTTPServerPipeline().flatMap {
-            channel.pipeline.addHandler(HttpHandler(detector: detector, mlp: mlp))
-        }
-    }
-    .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
-    .childChannelOption(.maxMessagesPerRead, value: 16)
-
-let channel: Channel
-if let sp = socketPath {
-    if FileManager.default.fileExists(atPath: sp) {
-        try FileManager.default.removeItem(atPath: sp)
-    }
-    channel = try bootstrap.bind(unixDomainSocketPath: sp).wait()
-    #if canImport(Darwin)
-    chmod(sp, 0o777)
-    #elseif canImport(Glibc)
-    chmod(sp, 0o777)
-    #endif
-    print("Listening on Unix socket \(sp)")
-} else {
-    channel = try bootstrap.bind(host: "0.0.0.0", port: port).wait()
-    print("Listening on port \(port)")
-}
-
-try channel.closeFuture.wait()
+let server = RawServer(detector: detector, socketPath: socketPath, port: port)
+server.run()

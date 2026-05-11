@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 
 WORKDIR /src
 
-COPY Package.swift Package.resolved ./
+COPY Package.swift ./
 COPY Sources/CSimd/ Sources/CSimd/
 COPY Sources/FraudDetector/ Sources/FraudDetector/
 COPY Sources/Preprocessor/ Sources/Preprocessor/
