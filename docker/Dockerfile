@@ -18,7 +18,7 @@ FROM swift:6.1-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-ARG INDEXES_URL=https://github.com/JordaoGustavo/rinha-backend-2026-swift/releases/download/v0.1.0/indexes.tar.gz
+ARG INDEXES_URL=https://github.com/JordaoGustavo/rinha-backend-2026-swift/releases/download/v0.2.0/indexes.tar.gz
 ARG RESOURCES_BASE_URL=https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources
 
 RUN mkdir -p /data /resources \
@@ -27,7 +27,6 @@ RUN mkdir -p /data /resources \
  && curl -fsSL "$RESOURCES_BASE_URL/normalization.json" -o /resources/normalization.json
 
 COPY --from=build /app-binary ./RinhaApp
-COPY resources/model.bin /resources/model.bin
 
 ENV INDEX_PATH=/data/ivf.bin
 ENV EXACT_PATH=/data/exact.bin

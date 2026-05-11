@@ -44,14 +44,20 @@ enum DataLoader {
         var labels = [UInt8]()
         labels.reserveCapacity(3_200_000)
 
+        let dimOrder = [6, 10, 9, 5, 11, 2, 4, 7, 0, 1, 8, 12, 3, 13]
+
         for (i, entry) in jsonArray.enumerated() {
             guard let vectorRaw = entry["vector"] as? [Any] else {
                 throw PreprocessorError.parseFailed("Entry \(i) missing 'vector'")
             }
-            let vector: [Float] = vectorRaw.map { v in
-                if let d = v as? Double { return Float(d) }
-                if let n = v as? NSNumber { return n.floatValue }
-                return 0
+            var orig = [Float](repeating: 0, count: 14)
+            for (j, v) in vectorRaw.prefix(14).enumerated() {
+                if let d = v as? Double { orig[j] = Float(d) }
+                else if let n = v as? NSNumber { orig[j] = n.floatValue }
+            }
+            var vector = [Float](repeating: 0, count: 14)
+            for d in 0..<14 {
+                vector[d] = orig[dimOrder[d]]
             }
             vectors.append(vector)
 

@@ -40,6 +40,10 @@ public enum TransactionParser {
     }
 
     /// Parse transaction JSON (nested format) and produce a 14-dim float vector (padded to 16).
+    /// Dimensions are variance-reordered to match the reference implementation:
+    /// [0]=kmCurrent [1]=cardPresent [2]=isOnline [3]=minsSinceLastTx
+    /// [4]=unknownMerchant [5]=amtRatio [6]=dayOfWeek [7]=kmHome
+    /// [8]=txAmount [9]=installments [10]=txCount24h [11]=mccRisk [12]=txHour [13]=merchAvg
     public static func parse(_ json: UnsafeRawBufferPointer, into vector: UnsafeMutablePointer<Float>) {
         for i in 0..<16 { vector[i] = 0 }
         guard json.count > 0 else { return }
@@ -70,36 +74,25 @@ public enum TransactionParser {
         let kmFromHome = (terminal?["km_from_home"] as? NSNumber)?.doubleValue ?? 0
 
         var merchantMcc = -1
-        if let mccNum = merchantMccRaw as? NSNumber {
-            merchantMcc = mccNum.intValue
-        } else if let mccStr = merchantMccRaw as? String, let v = Int(mccStr) {
+        if let mccStr = merchantMccRaw as? String, let v = Int(mccStr) {
             merchantMcc = v
         }
 
         var txYear = 0, txMonth = 0, txDay = 0, txHour = 0, txMinute = 0, txSecond = 0
         parseTimestamp(requestedAt, &txYear, &txMonth, &txDay, &txHour, &txMinute, &txSecond)
 
-        // [0] amount / maxAmount
-        vector[0] = round4(clamp01(txAmount / MccRisk.maxAmount))
+        let dow = dayOfWeekMonBased(year: txYear, month: txMonth, day: txDay)
 
-        // [1] installments / maxInstallments
-        vector[1] = round4(clamp01(txInstallments / MccRisk.maxInstallments))
-
-        // [2] (amount / custAvgAmount) / amountVsAvgRatio
-        if custAvgAmount == 0 {
-            vector[2] = 1.0
-        } else {
-            vector[2] = round4(clamp01((txAmount / custAvgAmount) / MccRisk.amountVsAvgRatio))
+        let merchantHash = fnv1a(merchantId)
+        var isUnknown = true
+        for km in knownMerchants {
+            if fnv1a(km) == merchantHash {
+                isUnknown = false
+                break
+            }
         }
 
-        // [3] hour / 23
-        vector[3] = round4(Double(txHour) / 23.0)
-
-        // [4] dayOfWeek / 6
-        let dow = dayOfWeekMonBased(year: txYear, month: txMonth, day: txDay)
-        vector[4] = round4(Double(dow) / 6.0)
-
-        // [5] minutesSinceLastTx, [6] kmFromCurrent
+        // [0] kmFromCurrent, [3] minsSinceLastTx
         if let lastTx = lastTransaction {
             let lastTs = lastTx["timestamp"] as? String ?? ""
             let kmFromCurrent = (lastTx["km_from_current"] as? NSNumber)?.doubleValue ?? 0
@@ -120,38 +113,49 @@ public enum TransactionParser {
                 minutes = Double(txTotal - lastTotal) / 60.0
             }
 
-            vector[5] = round4(clamp01(minutes / MccRisk.maxMinutes))
-            vector[6] = round4(clamp01(kmFromCurrent / MccRisk.maxKm))
+            vector[0] = round4(clamp01(kmFromCurrent / MccRisk.maxKm))
+            vector[3] = round4(clamp01(minutes / MccRisk.maxMinutes))
         } else {
-            vector[5] = -1.0
-            vector[6] = -1.0
+            vector[0] = -1.0
+            vector[3] = -1.0
         }
+
+        // [1] cardPresent
+        vector[1] = cardPresent ? 1.0 : 0.0
+
+        // [2] isOnline
+        vector[2] = isOnline ? 1.0 : 0.0
+
+        // [4] unknownMerchant
+        vector[4] = isUnknown ? 1.0 : 0.0
+
+        // [5] amountRatio
+        if custAvgAmount == 0 {
+            vector[5] = 1.0
+        } else {
+            vector[5] = round4(clamp01((txAmount / custAvgAmount) / MccRisk.amountVsAvgRatio))
+        }
+
+        // [6] dayOfWeek / 6
+        vector[6] = round4(Double(dow) / 6.0)
 
         // [7] kmFromHome / maxKm
         vector[7] = round4(clamp01(kmFromHome / MccRisk.maxKm))
 
-        // [8] txCount24h / maxTxCount24h
-        vector[8] = round4(clamp01(custTxCount24h / MccRisk.maxTxCount24h))
+        // [8] txAmount / maxAmount
+        vector[8] = round4(clamp01(txAmount / MccRisk.maxAmount))
 
-        // [9] isOnline
-        vector[9] = isOnline ? 1.0 : 0.0
+        // [9] installments / maxInstallments
+        vector[9] = round4(clamp01(txInstallments / MccRisk.maxInstallments))
 
-        // [10] cardPresent
-        vector[10] = cardPresent ? 1.0 : 0.0
+        // [10] txCount24h / maxTxCount24h
+        vector[10] = round4(clamp01(custTxCount24h / MccRisk.maxTxCount24h))
 
-        // [11] isUnknownMerchant — check if merchant.id is in customer.known_merchants
-        let merchantHash = fnv1a(merchantId)
-        var isUnknown = true
-        for km in knownMerchants {
-            if fnv1a(km) == merchantHash {
-                isUnknown = false
-                break
-            }
-        }
-        vector[11] = isUnknown ? 1.0 : 0.0
+        // [11] mccRisk
+        vector[11] = MccRisk.risk(for: merchantMcc)
 
-        // [12] mccRisk
-        vector[12] = MccRisk.risk(for: merchantMcc)
+        // [12] txHour / 23
+        vector[12] = round4(Double(txHour) / 23.0)
 
         // [13] merchantAvgAmount / maxMerchantAvgAmount
         vector[13] = round4(clamp01(merchantAvgAmount / MccRisk.maxMerchantAvgAmount))
@@ -182,9 +186,17 @@ public enum TransactionParser {
         return result
     }
 
+    private static let cumulativeDays = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+
     @inline(__always)
     private static func totalSeconds(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int, _ second: Int) -> Int {
-        let totalDays = year * 365 + year / 4 - year / 100 + year / 400 + month * 30 + day
-        return totalDays * 86400 + hour * 3600 + minute * 60 + second
+        let y = year - 1
+        var days = y * 365 + y / 4 - y / 100 + y / 400
+        days += cumulativeDays[month]
+        if month > 2 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) {
+            days += 1
+        }
+        days += day
+        return days * 86400 + hour * 3600 + minute * 60 + second
     }
 }
