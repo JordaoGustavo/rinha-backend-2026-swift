@@ -316,6 +316,51 @@ float csimd_float32_l2_squared(const float *a, const float *b) {
 #endif
 
 /* ================================================================== */
+/*  float32 dot product  (variable length)                             */
+/* ================================================================== */
+
+#if CSIMD_X86 && defined(__FMA__)
+
+float csimd_float32_dot(const float *a, const float *b, int n) {
+    __m256 acc = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), acc);
+    }
+    __m128 lo = _mm256_castps256_ps128(acc);
+    __m128 hi = _mm256_extractf128_ps(acc, 1);
+    __m128 sum = _mm_add_ps(lo, hi);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+    float result = _mm_cvtss_f32(sum);
+    for (; i < n; i++) result += a[i] * b[i];
+    return result;
+}
+
+#elif CSIMD_ARM64
+
+float csimd_float32_dot(const float *a, const float *b, int n) {
+    float32x4_t acc = vdupq_n_f32(0);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        acc = vfmaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
+    }
+    float result = vaddvq_f32(acc);
+    for (; i < n; i++) result += a[i] * b[i];
+    return result;
+}
+
+#else
+
+float csimd_float32_dot(const float *a, const float *b, int n) {
+    float sum = 0;
+    for (int i = 0; i < n; i++) sum += a[i] * b[i];
+    return sum;
+}
+
+#endif
+
+/* ================================================================== */
 /*  Prefetch                                                           */
 /* ================================================================== */
 

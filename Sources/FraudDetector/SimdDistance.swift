@@ -22,6 +22,10 @@ public enum SimdDistance {
         csimd_float32_l2_squared(a, b)
     }
     @inline(__always)
+    public static func float32Dot(_ a: UnsafePointer<Float>, _ b: UnsafePointer<Float>, _ n: Int) -> Float {
+        csimd_float32_dot(a, b, Int32(n))
+    }
+    @inline(__always)
     public static func prefetch(_ ptr: UnsafeRawPointer) {
         csimd_prefetch(ptr)
     }

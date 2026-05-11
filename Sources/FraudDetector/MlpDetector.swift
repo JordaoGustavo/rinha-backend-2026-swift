@@ -2,7 +2,7 @@ import Foundation
 
 public final class MlpDetector: @unchecked Sendable {
     private let numLayers: Int
-    private let threshold: Float
+    private var threshold: Float
     private let weights: [[Float]]  // transposed: cols × rows for fast matmul
     private let biases: [[Float]]
     private let layerSizes: [(Int, Int)]  // (input, output) per layer
@@ -57,6 +57,8 @@ public final class MlpDetector: @unchecked Sendable {
         self.layerSizes = sizes
     }
 
+    public func setThreshold(_ t: Float) { threshold = t }
+
     public struct MlpResult {
         public let confident: Bool
         public let isFraud: Bool
@@ -80,11 +82,7 @@ public final class MlpDetector: @unchecked Sendable {
                             let w = wBuf.baseAddress!
                             let b = bBuf.baseAddress!
                             for j in 0..<outSize {
-                                var sum = b[j]
-                                let wOff = j * inSize
-                                for i in 0..<inSize {
-                                    sum += src[i] * w[wOff + i]
-                                }
+                                let sum = b[j] + SimdDistance.float32Dot(src, w + j * inSize, inSize)
                                 dst[j] = isLast ? 1.0 / (1.0 + expf(-sum)) : (sum > 0 ? sum : 0)
                             }
                         }

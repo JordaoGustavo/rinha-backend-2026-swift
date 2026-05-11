@@ -25,8 +25,14 @@ print("Loaded \(detector.numVectors) vectors, \(detector.numClusters) clusters, 
 
 let mlp: MlpDetector?
 if let m = MlpDetector(path: modelPath) {
+    if let threshStr = ProcessInfo.processInfo.environment["MLP_THRESHOLD"],
+       let t = Float(threshStr) {
+        m.setThreshold(t)
+        print("MLP model loaded from \(modelPath), threshold=\(t)")
+    } else {
+        print("MLP model loaded from \(modelPath)")
+    }
     mlp = m
-    print("MLP model loaded from \(modelPath)")
 } else {
     mlp = nil
     print("No MLP model found, using k-NN only")
