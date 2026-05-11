@@ -1,12 +1,9 @@
 #if canImport(Darwin)
 import Darwin
-private let CSOCK_STREAM = SOCK_STREAM
 #elseif canImport(Glibc)
 import Glibc
-private let CSOCK_STREAM = CSOCK_STREAM
 #elseif canImport(Musl)
 import Musl
-private let CSOCK_STREAM = CSOCK_STREAM
 #endif
 
 import Foundation
@@ -27,7 +24,7 @@ public final class RawServer: @unchecked Sendable {
     public func run() {
         let fd: Int32
         if let sp = socketPath {
-            fd = socket(AF_UNIX, CSOCK_STREAM, 0)
+            fd = socket(AF_UNIX, Int32(1), 0)
             guard fd >= 0 else { fatalError("socket() failed: \(errno)") }
 
             unlink(sp)
@@ -48,7 +45,7 @@ public final class RawServer: @unchecked Sendable {
             chmod(sp, 0o777)
             print("Listening on Unix socket \(sp)")
         } else {
-            fd = socket(AF_INET, CSOCK_STREAM, 0)
+            fd = socket(AF_INET, Int32(1), 0)
             guard fd >= 0 else { fatalError("socket() failed: \(errno)") }
             var opt: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout<Int32>.size))
