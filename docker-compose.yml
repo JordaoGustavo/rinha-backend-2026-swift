@@ -27,6 +27,7 @@ services:
 
   api1:
     image: ghcr.io/jordaogustavo/rinha-api-swift:latest
+    pull_policy: always
     environment:
       - INDEX_PATH=/data/ivf.bin
       - EXACT_PATH=/data/exact.bin
@@ -46,6 +47,7 @@ services:
 
   api2:
     image: ghcr.io/jordaogustavo/rinha-api-swift:latest
+    pull_policy: always
     environment:
       - INDEX_PATH=/data/ivf.bin
       - EXACT_PATH=/data/exact.bin
