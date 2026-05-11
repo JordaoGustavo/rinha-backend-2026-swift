@@ -27,6 +27,7 @@ RUN mkdir -p /data /resources \
  && curl -fsSL "$RESOURCES_BASE_URL/normalization.json" -o /resources/normalization.json
 
 COPY --from=build /app-binary ./RinhaApp
+COPY resources/model.bin /resources/model.bin
 
 ENV INDEX_PATH=/data/ivf.bin
 ENV EXACT_PATH=/data/exact.bin

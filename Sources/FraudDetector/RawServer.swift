@@ -10,12 +10,17 @@ import Foundation
 
 public final class RawServer: @unchecked Sendable {
     private let detector: IvfDetector
+    private let mlp: MlpDetector?
     private let responses: ResponseCache
     private let socketPath: String?
     private let port: Int
 
-    public init(detector: IvfDetector, socketPath: String? = nil, port: Int = 8080) {
+    // Maps current (variance-reordered) positions back to old (MLP training) order
+    private static let reverseDimOrder = [8, 9, 5, 12, 6, 3, 0, 7, 10, 2, 1, 4, 11, 13]
+
+    public init(detector: IvfDetector, mlp: MlpDetector? = nil, socketPath: String? = nil, port: Int = 8080) {
         self.detector = detector
+        self.mlp = mlp
         self.responses = ResponseCache.build()
         self.socketPath = socketPath
         self.port = port
@@ -168,6 +173,32 @@ public final class RawServer: @unchecked Sendable {
         withUnsafeMutablePointer(to: &vector) { vPtr in
             let fp = UnsafeMutableRawPointer(vPtr).assumingMemoryBound(to: Float.self)
             TransactionParser.parse(jsonPtr, into: fp)
+        }
+
+        if let mlp = self.mlp {
+            var mlpVec = (
+                Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0)
+            )
+            withUnsafePointer(to: &vector) { srcPtr in
+                let src = UnsafeRawPointer(srcPtr).assumingMemoryBound(to: Float.self)
+                withUnsafeMutablePointer(to: &mlpVec) { dstPtr in
+                    let dst = UnsafeMutableRawPointer(dstPtr).assumingMemoryBound(to: Float.self)
+                    for i in 0..<14 {
+                        dst[i] = src[Self.reverseDimOrder[i]]
+                    }
+                }
+            }
+            let mlpResult = withUnsafePointer(to: &mlpVec) { ptr in
+                let fp = UnsafeRawPointer(ptr).assumingMemoryBound(to: Float.self)
+                return mlp.predict(vector: fp, dims: 14)
+            }
+            if mlpResult.confident {
+                let approved = !mlpResult.isFraud
+                let fc = mlpResult.isFraud ? 5 : 0
+                sendAll(fd, responses.get(approved: approved, fraudCount: fc))
+                return
+            }
         }
 
         let result = withUnsafePointer(to: &vector) { vPtr in
