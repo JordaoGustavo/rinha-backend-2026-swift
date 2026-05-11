@@ -64,18 +64,26 @@ public final class RawServer: @unchecked Sendable {
 
         guard listen(fd, 2048) == 0 else { fatalError("listen() failed: \(errno)") }
 
+        let numWorkers = 64
+        for _ in 0..<(numWorkers - 1) {
+            let t = Thread { [self] in self.acceptLoop(fd) }
+            t.stackSize = 256 * 1024
+            t.start()
+        }
+        acceptLoop(fd)
+    }
+
+    private func acceptLoop(_ listenFd: Int32) {
         while true {
             var clientAddr = sockaddr_storage()
             var clientLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
             let clientFd = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
                 addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sPtr in
-                    accept(fd, sPtr, &clientLen)
+                    accept(listenFd, sPtr, &clientLen)
                 }
             }
             guard clientFd >= 0 else { continue }
-            DispatchQueue.global().async { [self] in
-                self.handleConnection(clientFd)
-            }
+            handleConnection(clientFd)
         }
     }
 

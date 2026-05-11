@@ -32,12 +32,6 @@ public final class IvfDetector: @unchecked Sendable {
     private let exactVectors: UnsafePointer<Float>?
     private let exactNumVectors: Int
 
-    // Profile fast path
-    private let profileMask: [UInt8]
-    private let profileCount: [UInt16]
-    private let profileMinCount: Int
-    private let profileEnabled: Bool
-
     private static let topK = 5
     private static let rerankK = 6
     private static let paddedDims = IvfBinaryFormat.paddedDims
@@ -115,31 +109,6 @@ public final class IvfDetector: @unchecked Sendable {
             self.exactVectors = nil
         }
 
-        // Build profile fast path tables
-        let envProfile = ProcessInfo.processInfo.environment["PROFILE_FAST_PATH"] ?? "1"
-        self.profileEnabled = envProfile != "0"
-        self.profileMinCount = Int(ProcessInfo.processInfo.environment["PROFILE_MIN_COUNT"] ?? "30") ?? 30
-
-        if profileEnabled {
-            print("Building profile fast path tables...")
-            let tables = ProfileFastPath.build(
-                vectors: vectors, labels: labels, clusterMeta: clusterMeta,
-                numClusters: numClusters, paddedDims: Self.paddedDims, blockVectors: Self.blockVectors
-            )
-            self.profileMask = tables.mask
-            self.profileCount = tables.count
-
-            var legitHits = 0, fraudHits = 0, mixed = 0
-            for i in 0..<ProfileFastPath.keyCount {
-                if tables.mask[i] == ProfileFastPath.legitMask && tables.count[i] >= profileMinCount { legitHits += 1 }
-                else if tables.mask[i] == ProfileFastPath.fraudMask && tables.count[i] >= profileMinCount { fraudHits += 1 }
-                else if tables.mask[i] == 3 { mixed += 1 }
-            }
-            print("  Profile: \(legitHits) legit buckets, \(fraudHits) fraud buckets, \(mixed) mixed")
-        } else {
-            self.profileMask = []
-            self.profileCount = []
-        }
     }
 
     deinit {
@@ -182,20 +151,6 @@ public final class IvfDetector: @unchecked Sendable {
                 let v = (queryFloat[i] * scale).rounded()
                 let clamped = max(Float(Int16.min), min(Float(Int16.max), v))
                 qPtr[i] = Int16(clamped)
-            }
-        }
-
-        // Profile fast path
-        if profileEnabled {
-            let pkey = withUnsafePointer(to: &queryQ) { ptr in
-                ProfileFastPath.key(UnsafeRawPointer(ptr).assumingMemoryBound(to: Int16.self))
-            }
-            let pmask = profileMask[pkey]
-            if pmask == ProfileFastPath.legitMask && profileCount[pkey] >= profileMinCount {
-                return ScoreResult(approved: true, fraudCount: 0)
-            }
-            if pmask == ProfileFastPath.fraudMask && profileCount[pkey] >= profileMinCount {
-                return ScoreResult(approved: false, fraudCount: 5)
             }
         }
 
