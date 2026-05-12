@@ -32,9 +32,6 @@ if let m = MlpDetector(path: modelPath) {
     } else {
         print("MLP model loaded from \(modelPath)")
     }
-    let reverseDimOrder = [8, 9, 5, 12, 6, 3, 0, 7, 10, 2, 1, 4, 11, 13]
-    m.permuteFirstLayer(dimOrder: reverseDimOrder)
-    print("  first-layer weights permuted to match parser feature order")
     mlp = m
 } else {
     mlp = nil
