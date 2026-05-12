@@ -256,51 +256,15 @@ public final class IvfDetector: @unchecked Sendable {
             }
         }
 
-        var probedSet = [Bool](repeating: false, count: numClusters)
-        for i in 0..<centroidHeapSize {
-            probedSet[centroidHeap[i].index] = true
-        }
-
         var resultHeap = [Candidate](repeating: Candidate(dist: Int32.max, slot: -1), count: k)
         var resultHeapSize = 0
 
-        // Phase 2: Scan probed clusters
+        // Scan probed clusters
         for i in 0..<centroidHeapSize {
             let clusterIdx = centroidHeap[i].index
             let meta = clusterMeta[clusterIdx]
             let clusterCount = Int(meta.count)
             guard clusterCount > 0 else { continue }
-
-            if resultHeapSize == k {
-                let bboxMinPtr = bboxMin.advanced(by: clusterIdx * Self.paddedDims)
-                let bboxMaxPtr = bboxMax.advanced(by: clusterIdx * Self.paddedDims)
-                let lb = SimdDistance.int16BboxLowerBound(query, bboxMinPtr, bboxMaxPtr)
-                if lb > resultHeap[0].dist { continue }
-            }
-
-            scanCluster(
-                query: query,
-                clusterOffset: Int(meta.offset),
-                clusterCount: clusterCount,
-                heap: &resultHeap,
-                heapSize: &resultHeapSize,
-                k: k
-            )
-        }
-
-        // Phase 3: Bbox repair for non-probed clusters
-        for c in 0..<numClusters {
-            guard !probedSet[c] else { continue }
-            let meta = clusterMeta[c]
-            let clusterCount = Int(meta.count)
-            guard clusterCount > 0 else { continue }
-
-            if resultHeapSize == k {
-                let bboxMinPtr = bboxMin.advanced(by: c * Self.paddedDims)
-                let bboxMaxPtr = bboxMax.advanced(by: c * Self.paddedDims)
-                let lb = SimdDistance.int16BboxLowerBound(query, bboxMinPtr, bboxMaxPtr)
-                if lb > resultHeap[0].dist { continue }
-            }
 
             scanCluster(
                 query: query,

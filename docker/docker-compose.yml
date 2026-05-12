@@ -26,7 +26,7 @@ services:
       EXACT_PATH: /data/exact.bin
       RESOURCES_PATH: /resources
       SOCKET_PATH: /run/sock/api1.sock
-      NPROBE_FULL: "3"
+      NPROBE_FULL: "2"
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
@@ -45,7 +45,7 @@ services:
       EXACT_PATH: /data/exact.bin
       RESOURCES_PATH: /resources
       SOCKET_PATH: /run/sock/api2.sock
-      NPROBE_FULL: "3"
+      NPROBE_FULL: "2"
     cpuset: "2,3"
 
 volumes:
