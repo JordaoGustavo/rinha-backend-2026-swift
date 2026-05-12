@@ -33,7 +33,7 @@ public final class IvfDetector: @unchecked Sendable {
     private let exactNumVectors: Int
 
     private static let topK = 5
-    private static let rerankK = 6
+    private static let rerankK = 10
     private static let paddedDims = IvfBinaryFormat.paddedDims
     private static let blockVectors = IvfBinaryFormat.blockVectors
 
@@ -259,12 +259,33 @@ public final class IvfDetector: @unchecked Sendable {
         var resultHeap = [Candidate](repeating: Candidate(dist: Int32.max, slot: -1), count: k)
         var resultHeapSize = 0
 
-        // Scan probed clusters
+        // Sort probed clusters by ascending centroid distance
+        for i in 1..<centroidHeapSize {
+            let key = centroidHeap[i]
+            var j = i - 1
+            while j >= 0, centroidHeap[j].dist > key.dist {
+                centroidHeap[j + 1] = centroidHeap[j]
+                j -= 1
+            }
+            centroidHeap[j + 1] = key
+        }
+
+        // Scan probed clusters (closest first, with bbox pruning)
+        let pd = Self.paddedDims
         for i in 0..<centroidHeapSize {
             let clusterIdx = centroidHeap[i].index
             let meta = clusterMeta[clusterIdx]
             let clusterCount = Int(meta.count)
             guard clusterCount > 0 else { continue }
+
+            if resultHeapSize >= k {
+                let bboxLB = SimdDistance.int16BboxLowerBound(
+                    query,
+                    bboxMin.advanced(by: clusterIdx * pd),
+                    bboxMax.advanced(by: clusterIdx * pd)
+                )
+                if bboxLB >= resultHeap[0].dist { continue }
+            }
 
             scanCluster(
                 query: query,
