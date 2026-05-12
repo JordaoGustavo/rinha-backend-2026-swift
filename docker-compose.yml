@@ -14,8 +14,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
-          memory: "16MB"
+          cpus: "0.10"
+          memory: "10MB"
     ulimits:
       nofile:
         soft: 65535
@@ -33,15 +33,15 @@ services:
       - EXACT_PATH=/data/exact.bin
       - RESOURCES_PATH=/resources
       - SOCKET_PATH=/run/sock/api1.sock
-      - NPROBE_FULL=5
+      - NPROBE_FULL=20
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: "162MB"
+          cpus: "0.45"
+          memory: "170MB"
     networks:
       - rinha
 
@@ -53,15 +53,15 @@ services:
       - EXACT_PATH=/data/exact.bin
       - RESOURCES_PATH=/resources
       - SOCKET_PATH=/run/sock/api2.sock
-      - NPROBE_FULL=5
+      - NPROBE_FULL=20
     volumes:
       - sock:/run/sock
     cpuset: "2,3"
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: "162MB"
+          cpus: "0.45"
+          memory: "170MB"
     networks:
       - rinha
 
