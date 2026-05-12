@@ -15,9 +15,6 @@ public final class RawServer: @unchecked Sendable {
     private let socketPath: String?
     private let port: Int
 
-    // Maps current (variance-reordered) positions back to old (MLP training) order
-    private static let reverseDimOrder = [8, 9, 5, 12, 6, 3, 0, 7, 10, 2, 1, 4, 11, 13]
-
     public init(detector: IvfDetector, mlp: MlpDetector? = nil, socketPath: String? = nil, port: Int = 8080) {
         self.detector = detector
         self.mlp = mlp
@@ -176,20 +173,7 @@ public final class RawServer: @unchecked Sendable {
         }
 
         if let mlp = self.mlp {
-            var mlpVec = (
-                Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
-                Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0)
-            )
-            withUnsafePointer(to: &vector) { srcPtr in
-                let src = UnsafeRawPointer(srcPtr).assumingMemoryBound(to: Float.self)
-                withUnsafeMutablePointer(to: &mlpVec) { dstPtr in
-                    let dst = UnsafeMutableRawPointer(dstPtr).assumingMemoryBound(to: Float.self)
-                    for i in 0..<14 {
-                        dst[i] = src[Self.reverseDimOrder[i]]
-                    }
-                }
-            }
-            let mlpResult = withUnsafePointer(to: &mlpVec) { ptr in
+            let mlpResult = withUnsafePointer(to: &vector) { ptr in
                 let fp = UnsafeRawPointer(ptr).assumingMemoryBound(to: Float.self)
                 return mlp.predict(vector: fp, dims: 14)
             }
@@ -241,31 +225,30 @@ public final class RawServer: @unchecked Sendable {
 
     @inline(__always)
     private func parseContentLength(_ buf: UnsafePointer<UInt8>, _ headersEnd: Int) -> Int {
-        let cl16 = Array("Content-Length:".utf8)
-        let cl16Lower = Array("content-length:".utf8)
-        let needle = cl16.count
-
-        for i in 0..<(headersEnd - needle) {
-            var match = true
-            for j in 0..<needle {
-                if buf[i + j] != cl16[j] && buf[i + j] != cl16Lower[j] {
-                    match = false
-                    break
+        var i = 0
+        while i <= headersEnd - 16 {
+            if (buf[i] | 0x20) == 0x63 &&
+               (buf[i+1] | 0x20) == 0x6F && (buf[i+2] | 0x20) == 0x6E &&
+               (buf[i+3] | 0x20) == 0x74 && (buf[i+4] | 0x20) == 0x65 &&
+               (buf[i+5] | 0x20) == 0x6E && (buf[i+6] | 0x20) == 0x74 &&
+               buf[i+7] == 0x2D &&
+               (buf[i+8] | 0x20) == 0x6C && (buf[i+9] | 0x20) == 0x65 &&
+               (buf[i+10] | 0x20) == 0x6E && (buf[i+11] | 0x20) == 0x67 &&
+               (buf[i+12] | 0x20) == 0x74 && (buf[i+13] | 0x20) == 0x68 &&
+               buf[i+14] == 0x3A {
+                var p = i + 15
+                while p < headersEnd && buf[p] == 0x20 { p += 1 }
+                var v = 0
+                while p < headersEnd {
+                    let d = Int(buf[p]) - 48
+                    guard d >= 0 && d <= 9 else { break }
+                    v = v * 10 + d
+                    if v > 65536 { return -1 }
+                    p += 1
                 }
+                return v
             }
-            if !match { continue }
-
-            var p = i + needle
-            while p < headersEnd && buf[p] == 0x20 { p += 1 }
-            var v = 0
-            while p < headersEnd {
-                let d = Int(buf[p]) - 48
-                guard d >= 0 && d <= 9 else { break }
-                v = v * 10 + d
-                if v > 65536 { return -1 }
-                p += 1
-            }
-            return v
+            i += 1
         }
         return -1
     }

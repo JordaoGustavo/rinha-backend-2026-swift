@@ -3,7 +3,7 @@ import Foundation
 public final class MlpDetector: @unchecked Sendable {
     private let numLayers: Int
     private var threshold: Float
-    private let weights: [[Float]]  // transposed: cols × rows for fast matmul
+    private var weights: [[Float]]  // transposed: cols × rows for fast matmul
     private let biases: [[Float]]
     private let layerSizes: [(Int, Int)]  // (input, output) per layer
 
@@ -58,6 +58,19 @@ public final class MlpDetector: @unchecked Sendable {
     }
 
     public func setThreshold(_ t: Float) { threshold = t }
+
+    public func permuteFirstLayer(dimOrder: [Int]) {
+        let (inSize, outSize) = layerSizes[0]
+        var inverseMap = [Int](repeating: 0, count: inSize)
+        for i in 0..<dimOrder.count { inverseMap[dimOrder[i]] = i }
+        var permuted = [Float](repeating: 0, count: outSize * inSize)
+        for j in 0..<outSize {
+            for k in 0..<inSize {
+                permuted[j * inSize + k] = weights[0][j * inSize + inverseMap[k]]
+            }
+        }
+        weights[0] = permuted
+    }
 
     public struct MlpResult {
         public let confident: Bool

@@ -32,6 +32,9 @@ if let m = MlpDetector(path: modelPath) {
     } else {
         print("MLP model loaded from \(modelPath)")
     }
+    let reverseDimOrder = [8, 9, 5, 12, 6, 3, 0, 7, 10, 2, 1, 4, 11, 13]
+    m.permuteFirstLayer(dimOrder: reverseDimOrder)
+    print("  first-layer weights permuted to match parser feature order")
     mlp = m
 } else {
     mlp = nil
@@ -60,6 +63,11 @@ if FileManager.default.fileExists(atPath: warmupPath) {
             _ = vector.withUnsafeBufferPointer { buf in
                 detector.score(buf.baseAddress!)
             }
+            if let m = mlp {
+                _ = vector.withUnsafeBufferPointer { buf in
+                    m.predict(vector: buf.baseAddress!, dims: 14)
+                }
+            }
             warmedReal += 1
         }
     }
@@ -77,6 +85,11 @@ if warmedReal < warmupIterations {
         for d in 14..<16 { vector[d] = 0 }
         _ = vector.withUnsafeBufferPointer { buf in
             detector.score(buf.baseAddress!)
+        }
+        if let m = mlp {
+            _ = vector.withUnsafeBufferPointer { buf in
+                m.predict(vector: buf.baseAddress!, dims: 14)
+            }
         }
     }
 }

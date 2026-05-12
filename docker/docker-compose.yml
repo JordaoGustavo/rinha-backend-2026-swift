@@ -27,7 +27,7 @@ services:
       RESOURCES_PATH: /resources
       SOCKET_PATH: /run/sock/api1.sock
       NPROBE_FULL: "3"
-      MLP_THRESHOLD: "0.50"
+      MLP_THRESHOLD: "0.10"
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
@@ -47,7 +47,7 @@ services:
       RESOURCES_PATH: /resources
       SOCKET_PATH: /run/sock/api2.sock
       NPROBE_FULL: "3"
-      MLP_THRESHOLD: "0.50"
+      MLP_THRESHOLD: "0.10"
     cpuset: "2,3"
 
 volumes:
